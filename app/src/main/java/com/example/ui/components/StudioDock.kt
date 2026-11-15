@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -31,14 +32,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.audio.AudioFrame
+import com.example.audio.DeviceTapConfig
+import com.example.audio.SynthFallbackConfig
 import com.example.model.AudioSourceType
 import com.example.model.ColorEngineConfig
 import com.example.model.DspSettings
+import com.example.model.LfoChannelConfig
+import com.example.model.TempoSyncConfig
+import com.example.model.TempoSyncMode
+import com.example.model.TempoSyncSnapshot
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
 import com.example.model.VisualLayer
 import com.example.model.VisualizerPreset
 import com.example.model.VisualStyleType
+import com.example.ui.QuickLfoTarget
 import com.example.ui.StudioTab
 import com.example.ui.VisualizerUiState
 import com.example.ui.theme.ElectricCyan
@@ -50,12 +58,27 @@ import com.example.ui.theme.MistSecondary
 fun StudioDock(
     uiState: VisualizerUiState,
     audioFrame: AudioFrame,
+    tempoSnapshot: TempoSyncSnapshot,
     liveValues: Map<String, Float>,
+    hasTapHardwareSensor: Boolean,
     isWideScreen: Boolean,
     onSelectTab: (StudioTab) -> Unit,
     onToggleExpanded: () -> Unit,
     onSelectAudioSource: (AudioSourceType) -> Unit,
     onUpdateDsp: ((DspSettings) -> DspSettings) -> Unit,
+    onTapTempo: () -> Unit,
+    onSetTempoMode: (TempoSyncMode) -> Unit,
+    onSetManualBpm: (Float) -> Unit,
+    onHalveBpm: () -> Unit,
+    onDoubleBpm: () -> Unit,
+    onResetBpmMultiplier: () -> Unit,
+    onSyncDownbeatPhase: () -> Unit,
+    onUpdateTempoSyncConfig: ((TempoSyncConfig) -> TempoSyncConfig) -> Unit,
+    onUpdateLfoChannel: (Int, (LfoChannelConfig) -> LfoChannelConfig) -> Unit,
+    onAssignQuickLfoTarget: (QuickLfoTarget, Int) -> Unit,
+    onUpdateSynthFallback: ((SynthFallbackConfig) -> SynthFallbackConfig) -> Unit,
+    onUpdateDeviceTap: ((DeviceTapConfig) -> DeviceTapConfig) -> Unit,
+    onSimulateDeviceTapNow: () -> Unit,
     onLoadPreset: (VisualizerPreset) -> Unit,
     onPrevPreset: () -> Unit,
     onNextPreset: () -> Unit,
@@ -118,7 +141,7 @@ fun StudioDock(
         ) {
             Row(
                 modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 StudioTab.entries.forEach { tab ->
                     val selected = uiState.activeTab == tab && uiState.dockExpanded
@@ -126,6 +149,7 @@ fun StudioDock(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .weight(1f)
+                            .defaultMinSize(minHeight = 44.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) ElectricCyan.copy(alpha = 0.2f) else Color.Transparent)
                             .border(
@@ -139,9 +163,10 @@ fun StudioDock(
                     ) {
                         Text(
                             text = tab.label,
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.labelSmall,
                             color = if (selected) ElectricCyan else MistSecondary,
                             maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
@@ -192,6 +217,24 @@ fun StudioDock(
                         onRemove = onRemoveTransformer,
                         onUpdateTransformer = onUpdateTransformer,
                     )
+                    StudioTab.LFOS -> LfoAndTempoTabContent(
+                        lfoBank = uiState.lfoBank,
+                        tempoSyncConfig = uiState.dspSettings.tempoSync,
+                        tempoSnapshot = tempoSnapshot,
+                        layers = uiState.layers,
+                        transformers = uiState.transformers,
+                        colorEngine = uiState.colorEngine,
+                        onTapTempo = onTapTempo,
+                        onSetTempoMode = onSetTempoMode,
+                        onSetManualBpm = onSetManualBpm,
+                        onHalveBpm = onHalveBpm,
+                        onDoubleBpm = onDoubleBpm,
+                        onResetBpmMultiplier = onResetBpmMultiplier,
+                        onSyncDownbeatPhase = onSyncDownbeatPhase,
+                        onUpdateTempoSyncConfig = onUpdateTempoSyncConfig,
+                        onUpdateLfoChannel = onUpdateLfoChannel,
+                        onAssignQuickTarget = onAssignQuickLfoTarget,
+                    )
                     StudioTab.PALETTES -> PalettesTabContent(
                         colorEngine = uiState.colorEngine,
                         liveValues = liveValues,
@@ -223,8 +266,14 @@ fun StudioDock(
                         audioSource = uiState.audioSource,
                         audioFrame = audioFrame,
                         dspSettings = uiState.dspSettings,
+                        synthFallbackConfig = uiState.synthFallbackConfig,
+                        deviceTapConfig = uiState.deviceTapConfig,
+                        hasTapHardwareSensor = hasTapHardwareSensor,
                         onSelectAudioSource = onSelectAudioSource,
                         onUpdateDsp = onUpdateDsp,
+                        onUpdateSynthFallback = onUpdateSynthFallback,
+                        onUpdateDeviceTap = onUpdateDeviceTap,
+                        onSimulateDeviceTapNow = onSimulateDeviceTapNow,
                     )
                 }
             }

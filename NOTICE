@@ -1,0 +1,37 @@
+SoundKandee
+Copyright 2026 SoundKandee Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+THIRD-PARTY & BUNDLED ASSET NOTICES
+--------------------------------------------------------------------------------
+
+1. Android Jetpack / AndroidX Libraries & Kotlin Standard Library
+   - androidx.activity:activity-compose
+   - androidx.compose.* (Material 3, UI, Foundation, Material Icons)
+   - androidx.core:core-ktx
+   - androidx.datastore:datastore-preferences
+   - androidx.lifecycle:*
+   - org.jetbrains.kotlin:kotlin-stdlib
+   - org.jetbrains.kotlinx:kotlinx-coroutines-*
+   Licensed under the Apache License, Version 2.0.
+
+2. Bundled Open-Source Typefaces (SIL Open Font License 1.1)
+   - Syne (app/src/main/res/font/syne.ttf)
+   - Plus Jakarta Sans (app/src/main/res/font/plus_jakarta_sans.ttf)
+   - JetBrains Mono (app/src/main/res/font/jetbrains_mono.ttf)
+   Licensed under the SIL Open Font License, Version 1.1 (OFL-1.1).
+
+3. MilkDrop-Inspired Equations
+   Visual generator styles (MILK_WAVE_MATRIX, MILK_VECTOR_FIELD,
+   MILK_MOTION_SHAPES, MILK_SOLAR_CORONA) and warp/post-FX transformers
+   (MILK_PER_PIXEL_WARP, MILK_RADIAL_TUNNEL_PULL, MILK_ANAMORPHIC_STRETCH,
+   MILK_ANGULAR_PINWHEEL, MILK_EDGE_SOLARIZE, MILK_POSTERIZE_QUANTIZE,
+   MILK_MIRROR_QUAD, MILK_POLAR_UNWRAP) are clean-room Kotlin and AGSL
+   implementations inspired by the mathematical techniques popularized by
+   Ryan Geiss's open-source MilkDrop (BSD-3-Clause).

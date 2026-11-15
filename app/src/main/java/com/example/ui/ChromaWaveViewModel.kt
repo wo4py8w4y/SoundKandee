@@ -7,22 +7,31 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioCaptureCoordinator
 import com.example.audio.AudioFrame
+import com.example.audio.DeviceTapAction
+import com.example.audio.DeviceTapConfig
+import com.example.audio.DeviceTapDetector
+import com.example.audio.SynthFallbackConfig
+import com.example.audio.TempoSyncEngine
 import com.example.data.PersistedWorkspace
 import com.example.data.PreferencesRepository
-import com.example.model.AudioFilterScope
 import com.example.model.AudioSourceType
 import com.example.model.CaptureStatus
 import com.example.model.ColorEngineConfig
 import com.example.model.DspSettings
 import com.example.model.LayerBlendMode
+import com.example.model.LfoChannelConfig
+import com.example.model.ModulationDriver
 import com.example.model.PresetCatalog
-import com.example.model.ScopedParam
+import com.example.model.TempoSyncConfig
+import com.example.model.TempoSyncMode
+import com.example.model.TempoSyncSnapshot
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
 import com.example.model.VisualLayer
 import com.example.model.VisualizerPreset
 import com.example.model.VisualStyleType
 import java.util.UUID
+import kotlin.random.Random
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -35,15 +44,28 @@ import kotlinx.coroutines.launch
 enum class StudioTab(val label: String) {
     LAYERS("Layers"),
     TRANSFORMERS("FX"),
+    LFOS("LFO"),
     PALETTES("Color"),
     PRESETS("Presets"),
     AUDIO_DSP("Audio"),
+}
+
+enum class QuickLfoTarget(val label: String) {
+    FIRST_LAYER_SPIN("Layer Spin"),
+    FIRST_LAYER_SCALE("Layer Scale"),
+    FIRST_TX_AMOUNT("FX Amt"),
+    FIRST_TX_FREQ("FX Freq"),
+    HUE_SHIFT("Hue Shift"),
 }
 
 data class VisualizerUiState(
     val audioSource: AudioSourceType = AudioSourceType.OUTPUT_MIX,
     val captureStatus: CaptureStatus = CaptureStatus.Idle,
     val dspSettings: DspSettings = DspSettings(),
+    val lfoBank: List<LfoChannelConfig> = PresetCatalog.presets.first().lfoBank,
+    val deviceTapConfig: DeviceTapConfig = DeviceTapConfig(),
+    val synthFallbackConfig: SynthFallbackConfig = SynthFallbackConfig(),
+    val lastDeviceTapEventMs: Long = 0L,
     val layers: List<VisualLayer> = PresetCatalog.presets.first().layers,
     val transformers: List<TransformerNode> = PresetCatalog.presets.first().transformers,
     val colorEngine: ColorEngineConfig = PresetCatalog.defaultColorEngine(PresetCatalog.presets.first().paletteId),
@@ -69,20 +91,35 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
 
     private val prefsRepo = PreferencesRepository(application)
     val audioCoordinator = AudioCaptureCoordinator(application)
+    val tempoSyncEngine = TempoSyncEngine()
+    val deviceTapDetector = DeviceTapDetector(application) {
+        onPhysicalDeviceTapTriggered()
+    }
 
     private val _uiState = MutableStateFlow(VisualizerUiState())
     val uiState: StateFlow<VisualizerUiState> = _uiState.asStateFlow()
 
     val audioFrame: StateFlow<AudioFrame> = audioCoordinator.audioFrame
 
+    private val _tempoSnapshot = MutableStateFlow(TempoSyncSnapshot())
+    val tempoSnapshot: StateFlow<TempoSyncSnapshot> = _tempoSnapshot.asStateFlow()
+
     // Live per-frame evaluated values keyed by ScopedParam.id (read inside HUD dots without full-tree recomposition)
     val liveEvaluatedValues = mutableStateMapOf<String, Float>()
 
     init {
+        audioCoordinator.onBeatOnset = { timestampMs ->
+            tempoSyncEngine.onAutoBeatDetected(timestampMs)
+        }
+
         viewModelScope.launch {
             val saved = prefsRepo.workspaceFlow.first()
             val savedPresets = prefsRepo.userPresetsFlow.first()
             audioCoordinator.dspSettings = saved.dspSettings
+            audioCoordinator.synthFallbackConfig = saved.synthFallbackConfig
+            tempoSyncEngine.setTapBpm(saved.dspSettings.tempoSync.tapBpm)
+            deviceTapDetector.config = saved.deviceTapConfig
+            deviceTapDetector.syncListeningState()
             _uiState.update { current ->
                 val all = savedPresets + current.builtInPresets
                 val resolvedPresetId = saved.activePresetId?.takeIf { id -> all.any { it.id == id } }
@@ -92,11 +129,15 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                     transformers = saved.transformers,
                     colorEngine = saved.colorEngine,
                     dspSettings = saved.dspSettings,
+                    lfoBank = saved.lfoBank,
                     basePreset = basePreset,
                 )
                 current.copy(
                     audioSource = saved.audioSource,
                     dspSettings = saved.dspSettings,
+                    lfoBank = saved.lfoBank,
+                    deviceTapConfig = saved.deviceTapConfig,
+                    synthFallbackConfig = saved.synthFallbackConfig,
                     layers = saved.layers,
                     transformers = saved.transformers,
                     colorEngine = saved.colorEngine,
@@ -107,6 +148,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                     hasUnsavedChanges = dirty,
                 )
             }
+            _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(_uiState.value.dspSettings.tempoSync)
             if (audioCoordinator.hasRecordAudioPermission() && saved.audioSource != AudioSourceType.APP_PLAYBACK) {
                 audioCoordinator.startSource(saved.audioSource)
             }
@@ -126,6 +168,9 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                         PersistedWorkspace(
                             audioSource = state.audioSource,
                             dspSettings = state.dspSettings,
+                            lfoBank = state.lfoBank,
+                            deviceTapConfig = state.deviceTapConfig,
+                            synthFallbackConfig = state.synthFallbackConfig,
                             layers = state.layers,
                             transformers = state.transformers,
                             colorEngine = state.colorEngine,
@@ -141,13 +186,15 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
         transformers: List<TransformerNode>,
         colorEngine: ColorEngineConfig,
         dspSettings: DspSettings,
+        lfoBank: List<LfoChannelConfig>,
         basePreset: VisualizerPreset?,
     ): Boolean {
         if (basePreset == null) return false
         return layers != basePreset.layers ||
             transformers != basePreset.transformers ||
             colorEngine != basePreset.colorEngine ||
-            dspSettings != basePreset.dspSettings
+            dspSettings != basePreset.dspSettings ||
+            lfoBank != basePreset.lfoBank
     }
 
     private fun updateConfigState(transform: (VisualizerUiState) -> VisualizerUiState) {
@@ -160,10 +207,15 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                     transformers = next.transformers,
                     colorEngine = next.colorEngine,
                     dspSettings = next.dspSettings,
+                    lfoBank = next.lfoBank,
                     basePreset = base,
                 )
             )
         }
+    }
+
+    fun updateTempoSnapshot(snapshot: TempoSyncSnapshot) {
+        _tempoSnapshot.value = snapshot
     }
 
     fun updateLiveEvaluatedValues(map: Map<String, Float>) {
@@ -229,7 +281,136 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
         updateConfigState { state ->
             val next = transform(state.dspSettings)
             audioCoordinator.dspSettings = next
+            _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(next.tempoSync)
             state.copy(dspSettings = next)
+        }
+    }
+
+    // --- Tempo Sync & LFO Bank Actions ---
+
+    fun updateTempoSyncConfig(transform: (TempoSyncConfig) -> TempoSyncConfig) {
+        updateDspSettings { dsp ->
+            dsp.copy(tempoSync = transform(dsp.tempoSync))
+        }
+    }
+
+    fun tapTempo(nowMs: Long = System.currentTimeMillis()) {
+        val bpm = tempoSyncEngine.recordTap(nowMs)
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(
+                enabled = true,
+                mode = TempoSyncMode.TAP_TEMPO,
+                tapBpm = bpm,
+            )
+        }
+    }
+
+    fun setTempoMode(mode: TempoSyncMode) {
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(enabled = true, mode = mode)
+        }
+    }
+
+    fun setManualBpm(bpm: Float) {
+        val clamped = bpm.coerceIn(TempoSyncEngine.MIN_BPM, TempoSyncEngine.MAX_BPM)
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(enabled = true, mode = TempoSyncMode.MANUAL_BPM, manualBpm = clamped)
+        }
+    }
+
+    fun halveBpm() {
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(bpmMultiplier = (cfg.bpmMultiplier * 0.5f).coerceIn(0.25f, 4f))
+        }
+    }
+
+    fun doubleBpm() {
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(bpmMultiplier = (cfg.bpmMultiplier * 2f).coerceIn(0.25f, 4f))
+        }
+    }
+
+    fun resetBpmMultiplier() {
+        updateTempoSyncConfig { cfg ->
+            cfg.copy(bpmMultiplier = 1.0f)
+        }
+    }
+
+    fun syncDownbeatPhase() {
+        tempoSyncEngine.syncDownbeatPhase()
+        _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(_uiState.value.dspSettings.tempoSync)
+    }
+
+    fun resetAutoTempo() {
+        tempoSyncEngine.resetAutoTracker()
+        _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(_uiState.value.dspSettings.tempoSync)
+    }
+
+    fun updateLfoChannel(channelId: Int, transform: (LfoChannelConfig) -> LfoChannelConfig) {
+        updateConfigState { state ->
+            state.copy(
+                lfoBank = state.lfoBank.map { ch ->
+                    if (ch.id == channelId) transform(ch) else ch
+                }
+            )
+        }
+    }
+
+    fun assignQuickTargetToLfoBus(target: QuickLfoTarget, busId: Int) {
+        val busDriver = when (busId) {
+            1 -> ModulationDriver.LFO_BUS_1
+            2 -> ModulationDriver.LFO_BUS_2
+            else -> ModulationDriver.LFO_BUS_3
+        }
+        updateConfigState { state ->
+            when (target) {
+                QuickLfoTarget.FIRST_LAYER_SPIN -> {
+                    val first = state.layers.firstOrNull() ?: return@updateConfigState state
+                    val nextDriver = if (first.rotationSpeed.driver == busDriver) ModulationDriver.LFO_SINE else busDriver
+                    state.copy(
+                        layers = state.layers.mapIndexed { i, l ->
+                            if (i == 0) l.copy(rotationSpeed = l.rotationSpeed.copy(driver = nextDriver)) else l
+                        }
+                    )
+                }
+                QuickLfoTarget.FIRST_LAYER_SCALE -> {
+                    val first = state.layers.firstOrNull() ?: return@updateConfigState state
+                    val nextDriver = if (first.scale.driver == busDriver) ModulationDriver.BASS else busDriver
+                    state.copy(
+                        layers = state.layers.mapIndexed { i, l ->
+                            if (i == 0) l.copy(scale = l.scale.copy(driver = nextDriver)) else l
+                        }
+                    )
+                }
+                QuickLfoTarget.FIRST_TX_AMOUNT -> {
+                    val first = state.transformers.firstOrNull() ?: return@updateConfigState state
+                    val nextDriver = if (first.amount.driver == busDriver) ModulationDriver.BASS else busDriver
+                    state.copy(
+                        transformers = state.transformers.mapIndexed { i, t ->
+                            if (i == 0) t.copy(amount = t.amount.copy(driver = nextDriver)) else t
+                        }
+                    )
+                }
+                QuickLfoTarget.FIRST_TX_FREQ -> {
+                    val first = state.transformers.firstOrNull() ?: return@updateConfigState state
+                    val nextDriver = if (first.frequency.driver == busDriver) ModulationDriver.LFO_SINE else busDriver
+                    state.copy(
+                        transformers = state.transformers.mapIndexed { i, t ->
+                            if (i == 0) t.copy(frequency = t.frequency.copy(driver = nextDriver)) else t
+                        }
+                    )
+                }
+                QuickLfoTarget.HUE_SHIFT -> {
+                    val nextDriver = if (state.colorEngine.hueShift.driver == busDriver) {
+                        ModulationDriver.SPECTRAL_CENTROID
+                    } else busDriver
+                    state.copy(
+                        colorEngine = state.colorEngine.copy(
+                            hueShift = state.colorEngine.hueShift.copy(driver = nextDriver)
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -418,6 +599,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
             paletteId = state.colorEngine.paletteId,
             colorEngine = state.colorEngine,
             dspSettings = state.dspSettings,
+            lfoBank = state.lfoBank,
             isBuiltIn = false,
             createdAtEpochMs = now,
             updatedAtEpochMs = now,
@@ -451,6 +633,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
             paletteId = state.colorEngine.paletteId,
             colorEngine = state.colorEngine,
             dspSettings = state.dspSettings,
+            lfoBank = state.lfoBank,
             updatedAtEpochMs = now,
         )
         val updatedList = state.userPresets.map { if (it.id == presetId) updatedPreset else it }
@@ -469,12 +652,15 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
 
     fun loadPreset(preset: VisualizerPreset) {
         audioCoordinator.dspSettings = preset.dspSettings
+        tempoSyncEngine.setTapBpm(preset.dspSettings.tempoSync.tapBpm)
+        _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(preset.dspSettings.tempoSync)
         _uiState.update { state ->
             state.copy(
                 layers = preset.layers,
                 transformers = preset.transformers,
                 colorEngine = preset.colorEngine,
                 dspSettings = preset.dspSettings,
+                lfoBank = preset.lfoBank,
                 expandedLayerId = preset.layers.firstOrNull()?.id,
                 expandedTransformerId = preset.transformers.firstOrNull()?.id,
                 activePresetId = preset.id,
@@ -529,12 +715,15 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
         )
         val updatedList = listOf(copy) + state.userPresets
         audioCoordinator.dspSettings = copy.dspSettings
+        tempoSyncEngine.setTapBpm(copy.dspSettings.tempoSync.tapBpm)
+        _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(copy.dspSettings.tempoSync)
         _uiState.update { current ->
             current.copy(
                 layers = copy.layers,
                 transformers = copy.transformers,
                 colorEngine = copy.colorEngine,
                 dspSettings = copy.dspSettings,
+                lfoBank = copy.lfoBank,
                 expandedLayerId = copy.layers.firstOrNull()?.id,
                 expandedTransformerId = copy.transformers.firstOrNull()?.id,
                 userPresets = updatedList,
@@ -614,8 +803,43 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun updateDeviceTapConfig(transform: (DeviceTapConfig) -> DeviceTapConfig) {
+        _uiState.update { state ->
+            val next = transform(state.deviceTapConfig)
+            deviceTapDetector.config = next
+            deviceTapDetector.syncListeningState()
+            state.copy(deviceTapConfig = next)
+        }
+    }
+
+    fun onPhysicalDeviceTapTriggered(nowMs: Long = System.currentTimeMillis()) {
+        val cfg = _uiState.value.deviceTapConfig
+        when (cfg.action) {
+            DeviceTapAction.RANDOMIZE_OPTIONS -> randomize()
+            DeviceTapAction.MUTATE_SCOPES -> mutate()
+            DeviceTapAction.RANDOM_PRESET -> {
+                val all = _uiState.value.allPresets
+                val activeId = _uiState.value.activePresetId
+                val candidates = all.filter { it.id != activeId }.ifEmpty { all }
+                if (candidates.isNotEmpty()) {
+                    loadPreset(candidates[Random.nextInt(candidates.size)])
+                }
+            }
+        }
+        _uiState.update { it.copy(lastDeviceTapEventMs = nowMs) }
+    }
+
+    fun updateSynthFallbackConfig(transform: (SynthFallbackConfig) -> SynthFallbackConfig) {
+        _uiState.update { state ->
+            val next = transform(state.synthFallbackConfig)
+            audioCoordinator.synthFallbackConfig = next
+            state.copy(synthFallbackConfig = next)
+        }
+    }
+
     override fun onCleared() {
-        audioCoordinator.stopAll()
+        deviceTapDetector.stop()
+        audioCoordinator.release()
         super.onCleared()
     }
 }

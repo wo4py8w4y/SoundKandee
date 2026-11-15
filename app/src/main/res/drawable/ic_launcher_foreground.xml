@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/chromawave_icon_1794722327824"
+        android:drawable="@drawable/soundkandee_icon_1794726411343"
         android:gravity="center" />
 </layer-list>

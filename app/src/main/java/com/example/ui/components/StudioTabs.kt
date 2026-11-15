@@ -54,7 +54,15 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Waves
+import androidx.compose.material3.OutlinedButton
 import com.example.audio.AudioFrame
+import com.example.audio.DeviceTapAction
+import com.example.audio.DeviceTapConfig
+import com.example.audio.SynthFallbackConfig
+import com.example.audio.SynthMusicStyle
 import com.example.model.AudioSourceType
 import com.example.model.ColorEngineConfig
 import com.example.model.DspSettings
@@ -729,8 +737,14 @@ fun AudioDspTabContent(
     audioSource: AudioSourceType,
     audioFrame: AudioFrame,
     dspSettings: DspSettings,
+    synthFallbackConfig: SynthFallbackConfig,
+    deviceTapConfig: DeviceTapConfig,
+    hasTapHardwareSensor: Boolean,
     onSelectAudioSource: (AudioSourceType) -> Unit,
     onUpdateDsp: ((DspSettings) -> DspSettings) -> Unit,
+    onUpdateSynthFallback: ((SynthFallbackConfig) -> SynthFallbackConfig) -> Unit,
+    onUpdateDeviceTap: ((DeviceTapConfig) -> DeviceTapConfig) -> Unit,
+    onSimulateDeviceTapNow: () -> Unit,
 ) {
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -887,6 +901,204 @@ fun AudioDspTabContent(
                     range = 0f..0.9f,
                     onValueChange = { s -> onUpdateDsp { it.copy(globalSmoothing = s) } },
                 )
+            }
+        }
+
+        item(key = "idle_synth_fallback_card") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(ElevatedSurface.copy(alpha = 0.8f))
+                    .border(
+                        1.dp,
+                        if (synthFallbackConfig.enabled) ElectricCyan.copy(alpha = 0.6f) else LuminousBorder,
+                        RoundedCornerShape(12.dp),
+                    )
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Filled.Waves, contentDescription = null, tint = ElectricCyan, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text("Synthetic Music on Silence", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                            Text(
+                                text = if (audioFrame.isSyntheticFallback) "ACTIVE • Synthesizing ${synthFallbackConfig.style.label}" else "Auto-generates music-like data when idle",
+                                style = MonoTelemetryStyle,
+                                color = if (audioFrame.isSyntheticFallback) SolarAmber else MistSecondary,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = synthFallbackConfig.enabled,
+                        onCheckedChange = { on -> onUpdateSynthFallback { it.copy(enabled = on) } },
+                        colors = SwitchDefaults.colors(checkedThumbColor = ElectricCyan),
+                        modifier = Modifier.testTag("synth_fallback_switch"),
+                    )
+                }
+
+                if (synthFallbackConfig.enabled) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        SynthMusicStyle.entries.forEach { st ->
+                            val selected = synthFallbackConfig.style == st
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) ElectricCyan.copy(alpha = 0.22f) else HighestSurface)
+                                    .border(1.dp, if (selected) ElectricCyan else LuminousBorder, RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        onUpdateSynthFallback { it.copy(style = st, tempoBpm = st.defaultBpm) }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("synth_style_${st.name}"),
+                            ) {
+                                Text(st.label, style = MonoTelemetryStyle, color = if (selected) ElectricCyan else MistSecondary)
+                            }
+                        }
+                    }
+
+                    CompactLabeledSlider(
+                        label = "Synth Tempo",
+                        valueText = "${synthFallbackConfig.tempoBpm.toInt()} BPM",
+                        value = synthFallbackConfig.tempoBpm,
+                        range = 60f..180f,
+                        onValueChange = { bpm -> onUpdateSynthFallback { it.copy(tempoBpm = bpm) } },
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CompactLabeledSlider(
+                            label = "Synth Drive",
+                            valueText = "${(synthFallbackConfig.intensity * 100).toInt()}%",
+                            value = synthFallbackConfig.intensity,
+                            range = 0.2f..1.2f,
+                            onValueChange = { i -> onUpdateSynthFallback { it.copy(intensity = i) } },
+                            modifier = Modifier.weight(1f),
+                        )
+                        CompactLabeledSlider(
+                            label = "Silence Delay",
+                            valueText = "${String.format("%.1f", synthFallbackConfig.silenceDelaySec)}s",
+                            value = synthFallbackConfig.silenceDelaySec,
+                            range = 0.2f..6.0f,
+                            onValueChange = { d -> onUpdateSynthFallback { it.copy(silenceDelaySec = d) } },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+            }
+        }
+
+        item(key = "device_tap_sensor_card") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(ElevatedSurface.copy(alpha = 0.8f))
+                    .border(
+                        1.dp,
+                        if (deviceTapConfig.enabled) AcidMagenta.copy(alpha = 0.6f) else LuminousBorder,
+                        RoundedCornerShape(12.dp),
+                    )
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Filled.Sensors, contentDescription = null, tint = AcidMagenta, modifier = Modifier.size(18.dp))
+                        Column {
+                            Text("Tap Device for Random Options", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                            Text(
+                                text = if (!hasTapHardwareSensor) "Accelerometer unavailable on device (use test button)" else "Tap phone chassis to pick next options",
+                                style = MonoTelemetryStyle,
+                                color = MistSecondary,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = deviceTapConfig.enabled,
+                        onCheckedChange = { on -> onUpdateDeviceTap { it.copy(enabled = on) } },
+                        colors = SwitchDefaults.colors(checkedThumbColor = AcidMagenta),
+                        modifier = Modifier.testTag("device_tap_switch"),
+                    )
+                }
+
+                if (deviceTapConfig.enabled) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        DeviceTapAction.entries.forEach { act ->
+                            val selected = deviceTapConfig.action == act
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) AcidMagenta.copy(alpha = 0.22f) else HighestSurface)
+                                    .border(1.dp, if (selected) AcidMagenta else LuminousBorder, RoundedCornerShape(8.dp))
+                                    .clickable { onUpdateDeviceTap { it.copy(action = act) } }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                            ) {
+                                Text(act.label, style = MonoTelemetryStyle, color = if (selected) Color.White else MistSecondary)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CompactLabeledSlider(
+                            label = "Tap Threshold",
+                            valueText = "${String.format("%.1f", deviceTapConfig.sensitivityThreshold)} m/s²",
+                            value = deviceTapConfig.sensitivityThreshold,
+                            range = 2.5f..14.0f,
+                            onValueChange = { th -> onUpdateDeviceTap { it.copy(sensitivityThreshold = th) } },
+                            modifier = Modifier.weight(1f),
+                        )
+                        CompactLabeledSlider(
+                            label = "Cooldown",
+                            valueText = "${deviceTapConfig.cooldownMs}ms",
+                            value = deviceTapConfig.cooldownMs.toFloat(),
+                            range = 300f..1500f,
+                            onValueChange = { cd -> onUpdateDeviceTap { it.copy(cooldownMs = cd.toLong()) } },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onSimulateDeviceTapNow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("simulate_device_tap_btn"),
+                    ) {
+                        Text("Trigger Tap Action Now", color = Color.White)
+                    }
+                }
             }
         }
     }

@@ -256,7 +256,8 @@ class ConfigurableDspProcessor(private val fftSize: Int = 1024) {
         // Spectral-flux beat detection
         fluxAverage = fluxAverage * 0.92f + flux * 0.08f
         val dynamicThresh = max(0.28f, fluxAverage * settings.beatThreshold)
-        if (flux > dynamicThresh && (nowMs - lastBeatMs) >= settings.beatCooldownMs && gatedRms > 0.02f) {
+        val isBeatOnset = flux > dynamicThresh && (nowMs - lastBeatMs) >= settings.beatCooldownMs && gatedRms > 0.02f
+        if (isBeatOnset) {
             beatPulse = 1.0f
             lastBeatMs = nowMs
         } else {
@@ -284,6 +285,8 @@ class ConfigurableDspProcessor(private val fftSize: Int = 1024) {
             spectralCentroid = centroidNorm,
             dominantHz = dominantHz,
             beatPulse = beatPulse,
+            beatOnset = isBeatOnset,
+            beatTimestampMs = if (isBeatOnset) nowMs else lastBeatMs,
             isSignalActive = active,
             timestampNs = System.nanoTime(),
         )

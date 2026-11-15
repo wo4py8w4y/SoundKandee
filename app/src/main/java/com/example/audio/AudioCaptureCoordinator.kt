@@ -42,6 +42,33 @@ class AudioCaptureCoordinator(private val context: Context) {
     @Volatile
     var dspSettings: DspSettings = DspSettings()
 
+    @Volatile
+    var synthFallbackConfig: SynthFallbackConfig = SynthFallbackConfig()
+        set(value) {
+            field = value
+            if (value.enabled) {
+                ensureIdleSynthLoopRunning()
+            } else {
+                stopSynthFallbackIfRunning()
+            }
+        }
+
+    @Volatile
+    var onBeatOnset: ((Long) -> Unit)? = null
+
+    @Volatile
+    private var lastRealSignalMs: Long = 0L
+
+    @Volatile
+    private var lastLiveStatus: CaptureStatus = CaptureStatus.Idle
+
+    @Volatile
+    private var isSynthEmitting: Boolean = false
+
+    private val synthGenerator = SyntheticMusicGenerator(44100)
+    private val synthDsp = ConfigurableDspProcessor()
+    private var synthJob: Job? = null
+
     private var activeSourceJob: Job? = null
     private var micRecord: AudioRecord? = null
     private var outputVisualizer: Visualizer? = null
@@ -49,10 +76,88 @@ class AudioCaptureCoordinator(private val context: Context) {
     init {
         PlaybackCaptureBridge.dspSettingsProvider = { dspSettings }
         PlaybackCaptureBridge.onAudioFrame = { frame ->
-            _audioFrame.value = frame
+            handleRealAudioFrame(frame, "App Audio", "44kHz PCM")
         }
         PlaybackCaptureBridge.onStatusChanged = { status ->
-            _captureStatus.value = status
+            lastLiveStatus = status
+            if (!isSynthEmitting || status is CaptureStatus.Active) {
+                _captureStatus.value = status
+            }
+        }
+        if (synthFallbackConfig.enabled) {
+            ensureIdleSynthLoopRunning()
+        }
+    }
+
+    private fun handleRealAudioFrame(frame: AudioFrame, sourceLabel: String, activeDetail: String) {
+        val nowMs = System.currentTimeMillis()
+        if (frame.isSignalActive) {
+            lastRealSignalMs = nowMs
+            isSynthEmitting = false
+            _audioFrame.value = frame
+            if (frame.beatOnset) {
+                onBeatOnset?.invoke(frame.beatTimestampMs)
+            }
+            val activeStatus = CaptureStatus.Active(sourceLabel, activeDetail)
+            lastLiveStatus = activeStatus
+            _captureStatus.value = activeStatus
+        } else {
+            val silentStatus = CaptureStatus.SilentSignal(sourceLabel)
+            lastLiveStatus = silentStatus
+            if (!isSynthEmitting) {
+                _audioFrame.value = frame
+                _captureStatus.value = silentStatus
+            }
+        }
+    }
+
+    private fun ensureIdleSynthLoopRunning() {
+        if (synthJob?.isActive == true) return
+        synthJob = scope.launch {
+            while (isActive) {
+                val cfg = synthFallbackConfig
+                if (!cfg.enabled) {
+                    if (isSynthEmitting) {
+                        isSynthEmitting = false
+                        _audioFrame.value = AudioFrame()
+                        _captureStatus.value = lastLiveStatus
+                    }
+                    kotlinx.coroutines.delay(100L)
+                    continue
+                }
+
+                val nowMs = System.currentTimeMillis()
+                val silenceElapsedMs = nowMs - lastRealSignalMs
+                val delayMs = (cfg.silenceDelaySec * 1000f).toLong().coerceAtLeast(0L)
+
+                if (lastRealSignalMs == 0L || silenceElapsedMs >= delayMs) {
+                    isSynthEmitting = true
+                    val pcm = synthGenerator.generateNextBuffer(sampleCount = 1024, config = cfg)
+                    val frame = synthDsp.processPcm16(
+                        pcm = pcm,
+                        sampleCount = pcm.size,
+                        sampleRateHz = 44100,
+                        settings = dspSettings,
+                        nowMs = nowMs,
+                    ).copy(isSyntheticFallback = true)
+                    _audioFrame.value = frame
+                    if (frame.beatOnset) {
+                        onBeatOnset?.invoke(frame.beatTimestampMs)
+                    }
+                    _captureStatus.value = CaptureStatus.SyntheticFallback(cfg.style.label)
+                } else if (isSynthEmitting) {
+                    isSynthEmitting = false
+                }
+                kotlinx.coroutines.delay(23L)
+            }
+        }
+    }
+
+    private fun stopSynthFallbackIfRunning() {
+        if (isSynthEmitting) {
+            isSynthEmitting = false
+            _audioFrame.value = AudioFrame()
+            _captureStatus.value = lastLiveStatus
         }
     }
 
@@ -154,12 +259,7 @@ class AudioCaptureCoordinator(private val context: Context) {
                         sampleRateHz = sampleRate,
                         settings = dspSettings,
                     )
-                    _audioFrame.value = frame
-                    _captureStatus.value = if (frame.isSignalActive) {
-                        CaptureStatus.Active("Microphone", "${sampleRate / 1000}kHz Live")
-                    } else {
-                        CaptureStatus.SilentSignal("Microphone")
-                    }
+                    handleRealAudioFrame(frame, "Microphone", "${sampleRate / 1000}kHz Live")
                 }
             }
         }
@@ -200,12 +300,7 @@ class AudioCaptureCoordinator(private val context: Context) {
                             sampleRateHz = srHz,
                             settings = dspSettings,
                         )
-                        _audioFrame.value = frame
-                        _captureStatus.value = if (frame.isSignalActive) {
-                            CaptureStatus.Active("Output Mix", "Session 0")
-                        } else {
-                            CaptureStatus.SilentSignal("Output Mix")
-                        }
+                        handleRealAudioFrame(frame, "Output Mix", "Session 0")
                     }
 
                     override fun onFftDataCapture(
@@ -262,6 +357,15 @@ class AudioCaptureCoordinator(private val context: Context) {
             }
             context.startService(stopIntent)
         }
-        _captureStatus.value = CaptureStatus.Idle
+        lastLiveStatus = CaptureStatus.Idle
+        if (!isSynthEmitting) {
+            _captureStatus.value = CaptureStatus.Idle
+        }
+    }
+
+    fun release() {
+        synthJob?.cancel()
+        synthJob = null
+        stopAll()
     }
 }

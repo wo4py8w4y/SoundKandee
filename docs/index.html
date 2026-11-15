@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SoundKandee — Modular Android Audio Visualizer (FOSS)</title>
+  <meta name="description" content="SoundKandee is a free, open-source, 100% offline Android audio visualizer powered by bounded parameter scopes, 12 generators, 17 MilkDrop & AGSL transforms, BPM tempo sync, LFO buses, accelerometer tap randomization, and synthetic idle music." />
+  <link rel="icon" type="image/jpeg" href="assets/soundkandee-icon.jpg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a href="index.html" class="brand-lockup">
+        <img src="assets/soundkandee-icon.jpg" alt="SoundKandee Kee icon" class="brand-icon" />
+        <span class="brand-title">Sound<span>Kandee</span></span>
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="index.html" class="nav-link active">Product</a>
+        <a href="#features" class="nav-link">Features</a>
+        <a href="#catalog" class="nav-link">Shaders &amp; FX</a>
+        <a href="#foss" class="nav-link">FOSS Audit</a>
+        <a href="architecture.html" class="nav-link">Architecture &amp; Oddities</a>
+        <a href="architecture.md" class="nav-cta mono">architecture.md</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero + Live Interactive Simulator -->
+    <section class="hero">
+      <div class="container hero-grid">
+        <div>
+          <div class="badge-row">
+            <span class="pill-badge cyan">Apache-2.0 FOSS</span>
+            <span class="pill-badge magenta">Android 7.0 – 16 (API 24–36)</span>
+            <span class="pill-badge amber">Zero Network Permission • 100% Offline</span>
+          </div>
+
+          <img
+            src="assets/soundkandee-logo.jpg"
+            alt="SoundKandee candy-lettered K-e-e logo"
+            class="hero-logo-banner"
+          />
+
+          <h1>Psychedelic Audio Visuals With Modular Synth Precision.</h1>
+          <p class="hero-sub">
+            SoundKandee transforms live device playback, ambient microphone sound, or synthetic idle music through
+            <strong>12 overlapping generators</strong>, <strong>17 MilkDrop &amp; AGSL post-FX transformers</strong>,
+            and strictly bounded <code class="mono">[scopeMin..scopeMax]</code> modulation scopes locked to your track’s BPM.
+          </p>
+
+          <div class="cta-row">
+            <a href="#features" class="btn btn-primary">Explore Features</a>
+            <a href="architecture.html" class="btn btn-magenta">Read Code Oddities &amp; Architecture</a>
+            <a href="#foss" class="btn btn-outline">Verify FOSS Audit</a>
+          </div>
+        </div>
+
+        <!-- Live Browser Visualizer Console -->
+        <div class="studio-card" aria-label="Interactive SoundKandee Web Simulator">
+          <div class="studio-hud">
+            <div class="studio-status">
+              <div class="beat-leds" aria-label="4-Beat Bar Clock">
+                <span class="beat-led downbeat" id="led0"></span>
+                <span class="beat-led" id="led1"></span>
+                <span class="beat-led" id="led2"></span>
+                <span class="beat-led" id="led3"></span>
+              </div>
+              <span id="simStatusLabel" class="mono">Synth Idle • Techno Pulse • SINE LFO</span>
+            </div>
+            <button type="button" id="simTapTempoBtn" class="chip-btn active mono">
+              TAP <span id="simBpmReadout">126 BPM</span>
+            </button>
+          </div>
+
+          <div class="canvas-wrap">
+            <canvas id="simCanvas"></canvas>
+            <div class="canvas-overlay-tag mono" id="simOverlayTag">Hyperspace Mandala • 126 BPM</div>
+          </div>
+
+          <div class="studio-controls">
+            <div class="control-row">
+              <span class="mono" style="font-size:0.74rem;color:var(--dim);">PRESET:</span>
+              <button type="button" class="chip-btn active" data-preset="mandala">Hyperspace Mandala</button>
+              <button type="button" class="chip-btn" data-preset="geiss">Geiss Warp</button>
+              <button type="button" class="chip-btn" data-preset="pinwheel">Acid Pinwheel</button>
+              <button type="button" class="chip-btn" data-preset="osc">Acid Osc</button>
+            </div>
+            <div class="control-row">
+              <span class="mono" style="font-size:0.74rem;color:var(--dim);">LFO:</span>
+              <button type="button" class="chip-btn magenta active" data-lfo="SINE">SIN</button>
+              <button type="button" class="chip-btn magenta" data-lfo="TRI">TRI</button>
+              <button type="button" class="chip-btn magenta" data-lfo="SAW">SAW+</button>
+              <button type="button" class="chip-btn magenta" data-lfo="SQR">SQR</button>
+              <button type="button" class="chip-btn magenta" data-lfo="SH">S&amp;H</button>
+              <button type="button" id="simSynthToggle" class="chip-btn active" style="margin-left:auto;">Synth Idle: ON</button>
+              <button type="button" id="simDeviceTapBtn" class="chip-btn" style="border-color:var(--amber);color:var(--amber);">Tap Device Randomize</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Core Feature Set -->
+    <section id="features">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-kicker">Complete Studio Engine</div>
+          <h2 class="section-title">Built Like a Visual Modular Synthesizer</h2>
+          <p class="section-desc">
+            Every parameter on every visual layer and transformer is clamped strictly inside user-defined operating bounds, filtered to a custom frequency window, and driven by audio envelopes, Master LFOs, or BPM beat quantization.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <article class="glass-card">
+            <span class="card-tag">AUDIO INGESTION</span>
+            <h3>Triple Capture + Synth Idle Fallback</h3>
+            <p>
+              Switch between <strong>Output Mix</strong> (Visualizer Session 0), <strong>App Audio</strong> (Android 10+ MediaProjection PCM-16), and <strong>Microphone</strong>. When silence exceeds your delay threshold, <strong>SyntheticMusicGenerator</strong> synthesizes multi-voice music through the real FFT pipeline and yields instantaneously when live audio returns.
+            </p>
+          </article>
+
+          <article class="glass-card">
+            <span class="card-tag magenta">MODULATION MATRIX</span>
+            <h3>Bounded ScopedParam &amp; Bandpass Windows</h3>
+            <p>
+              Every parameter defines <code class="mono">[scopeMin..scopeMax]</code> bounds inside hard hardware limits, <strong>22 drivers</strong>, <strong>5 response curves</strong> (Linear, Exp, Log, Quantize, Gate), attack/release slew, inversion, lock pins, and per-layer <strong>20 Hz–20 kHz bandpass filter windows</strong>.
+            </p>
+          </article>
+
+          <article class="glass-card">
+            <span class="card-tag amber">TEMPO &amp; LFO ENGINE</span>
+            <h3>Auto-Beat PLL, Tap-Tempo &amp; 3 LFO Buses</h3>
+            <p>
+              Spectral-flux beat detection with 65–180 BPM octave folding and PLL phase tracking, paired with instant tap-tempo downbeat snapping (<code class="mono">÷2</code> / <code class="mono">1x</code> / <code class="mono">×2</code>). Includes <strong>3 Global Master LFO Buses</strong> with oscilloscope visualization and beat-grid FX step quantization.
+            </p>
+          </article>
+
+          <article class="glass-card">
+            <span class="card-tag">MILKDROP + AGSL GPU</span>
+            <h3>12 Generators &amp; 17 Overlappable FX</h3>
+            <p>
+              Stack infinite blend-mode layers (*Screen, Add, Difference, Exclusion, Overlay, Multiply*) alongside offscreen ping-pong Feedback Echo Trails and fused Android 13+ AGSL shaders for MilkDrop per-pixel warps, zoomexp tunnels, pinwheels, solarize, and CRT curves.
+            </p>
+          </article>
+
+          <article class="glass-card">
+            <span class="card-tag magenta">PHYSICAL GESTURE</span>
+            <h3>Tap-the-Device Randomizer</h3>
+            <p>
+              Uses <code class="mono">Sensor.TYPE_LINEAR_ACCELERATION</code> (with gravity-filtered <code class="mono">TYPE_ACCELEROMETER</code> fallback and zero permissions) so physically tapping your phone randomizes options, mutates within your scopes, or switches presets—preserving locked layers &amp; palettes.
+            </p>
+          </article>
+
+          <article class="glass-card">
+            <span class="card-tag amber">LOCAL PRESET STUDIO</span>
+            <h3>Complete Snapshot Management</h3>
+            <p>
+              Ships with <strong>8 built-in presets</strong> and <strong>12 color palettes</strong> plus a 2–5 stop custom color editor. Save, overwrite, duplicate, rename, delete, or revert full configurations in Jetpack DataStore—and swipe into distraction-free edge-to-edge <strong>Zen Mode</strong>.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Visual Styles & Transformers Explorer -->
+    <section id="catalog">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-kicker">12 Visual Styles • 17 Transformers</div>
+          <h2 class="section-title">Generators, MilkDrop Equations &amp; Post-FX</h2>
+          <p class="section-desc">
+            Filter the complete production registry directly from SoundKandee’s engine.
+          </p>
+        </div>
+
+        <div class="filter-bar">
+          <button type="button" class="chip-btn active" data-filter="all">All (29 Modules)</button>
+          <button type="button" class="chip-btn" data-filter="styles">12 Visual Generators</button>
+          <button type="button" class="chip-btn" data-filter="transformers">17 Transformers</button>
+          <button type="button" class="chip-btn magenta" data-filter="milkdrop">12 MilkDrop-Inspired</button>
+        </div>
+
+        <div id="catalogGrid" class="catalog-grid"></div>
+
+        <div class="section-header" style="margin-top:40px;">
+          <div class="section-kicker">Color Engine</div>
+          <h3 class="section-title" style="font-size:1.5rem;">12 Curated Palettes + Live Hue Drift &amp; Beat Chroma Flash</h3>
+        </div>
+        <div id="paletteGrid" class="palette-grid"></div>
+      </div>
+    </section>
+
+    <!-- FOSS Verification Section -->
+    <section id="foss">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-kicker">License &amp; Supply-Chain Verification</div>
+          <h2 class="section-title">Verified Free, Offline &amp; Open Source (FOSS)</h2>
+          <p class="section-desc">
+            Every active dependency in the release runtime classpath, bundled asset, and manifest permission has been audited for free redistribution and zero telemetry.
+          </p>
+        </div>
+
+        <div class="audit-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Verification Check</th>
+                <th>Result</th>
+                <th>Verified Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>OSI-Approved License</strong></td>
+                <td><span style="color:var(--cyan);font-weight:700;">PASS — Apache 2.0</span></td>
+                <td>Root <code class="mono">LICENSE</code> (Apache License 2.0) and <code class="mono">NOTICE</code> attribution manifest included.</td>
+              </tr>
+              <tr>
+                <td><strong>Release Runtime Classpath</strong></td>
+                <td><span style="color:var(--cyan);font-weight:700;">PASS — 100% Apache-2.0</span></td>
+                <td><code class="mono">gradle :app:dependencies --configuration releaseRuntimeClasspath</code> contains solely <code class="mono">kotlin-stdlib</code>, <code class="mono">androidx.*</code>, and <code class="mono">kotlinx-coroutines</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Proprietary Play / Firebase / Ads SDKs</strong></td>
+                <td><span style="color:var(--cyan);font-weight:700;">PASS — 0 Active Blobs</span></td>
+                <td>Firebase, Room, Moshi, and Play Services entries are commented out in <code class="mono">app/build.gradle.kts</code>; zero <code class="mono">google-services.json</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Network &amp; Privacy Posture</strong></td>
+                <td><span style="color:var(--cyan);font-weight:700;">PASS — Zero Network Access</span></td>
+                <td><code class="mono">INTERNET</code> permission is absent from <code class="mono">AndroidManifest.xml</code>. All DSP, shaders, and DataStore presets run 100% locally.</td>
+              </tr>
+              <tr>
+                <td><strong>Bundled Fonts &amp; Artwork</strong></td>
+                <td><span style="color:var(--cyan);font-weight:700;">PASS — SIL OFL 1.1 &amp; Original</span></td>
+                <td><code class="mono">Syne</code>, <code class="mono">Plus Jakarta Sans</code>, and <code class="mono">JetBrains Mono</code> (OFL-1.1) plus bespoke SoundKandee artwork.</td>
+              </tr>
+              <tr>
+                <td><strong>APK Metadata &amp; F-Droid Build Note</strong></td>
+                <td><span style="color:var(--amber);font-weight:700;">PASS (1 Passthrough Note)</span></td>
+                <td><code class="mono">dependenciesInfo.includeInApk = false</code> disables Play dependency blocks. Note: unused <code class="mono">google-services</code> plugin runs in passthrough mode (<code class="mono">WARN</code>) for IDE compatibility and adds zero runtime code; strict F-Droid recipes can strip that plugin line.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <div>
+        <strong>SoundKandee</strong> — Apache-2.0 Free &amp; Open Source Audio Visualizer
+      </div>
+      <div class="nav-links">
+        <a href="architecture.html">Architecture &amp; Oddities Webpage</a>
+        <a href="architecture.md">Markdown Deep Dive</a>
+        <a href="../LICENSE">Apache 2.0 License</a>
+        <a href="../NOTICE">Third-Party Notice</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

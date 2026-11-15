@@ -39,8 +39,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.example.audio.AudioFrame
+import com.example.audio.TempoSyncEngine
 import com.example.model.ColorEngineConfig
+import com.example.model.LfoChannelConfig
 import com.example.model.ModulationEvaluator
+import com.example.model.TempoSyncConfig
+import com.example.model.TempoSyncSnapshot
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
 import com.example.model.VisualLayer
@@ -56,6 +60,7 @@ import kotlin.random.Random
  * - Multi-layer overlapping visual generators with BlendModes & per-layer Hz band filters
  * - Offscreen ping-pong echo buffer for Feedback Echo Trails
  * - Overlapping spatial & wave transformers (Kaleidoscope, Tile Mosaic, Vortex, WaveFold, Chromatic Split, Ripples, Bloom, CRT)
+ * - Tempo-synced visual oscillator clock & 3 Master LFO buses
  * - Tactile pinch/pan focal point steering & tap-to-Zen toggle
  */
 @Composable
@@ -63,8 +68,12 @@ fun VisualizerCanvas(
     layers: List<VisualLayer>,
     transformers: List<TransformerNode>,
     colorEngine: ColorEngineConfig,
+    tempoSyncConfig: TempoSyncConfig,
+    lfoBank: List<LfoChannelConfig>,
+    tempoSyncEngine: TempoSyncEngine,
     audioFrameProvider: () -> AudioFrame,
     onLiveEvaluatedValues: (Map<String, Float>) -> Unit,
+    onTempoSnapshot: (TempoSyncSnapshot) -> Unit,
     onTapCanvas: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -80,6 +89,7 @@ fun VisualizerCanvas(
 
     var frameTick by remember { mutableLongStateOf(0L) }
     var elapsedSec by remember { mutableFloatStateOf(0f) }
+    var oscTimeSec by remember { mutableFloatStateOf(0f) }
     var accumulatedHueDeg by remember { mutableFloatStateOf(0f) }
     val layerRotations = remember { HashMap<String, Float>() }
 
@@ -100,8 +110,9 @@ fun VisualizerCanvas(
     var activeTxValues by remember { mutableStateOf<Map<TransformerType, Triple<Float, Float, Float>>>(emptyMap()) }
     var lastDtSec by remember { mutableFloatStateOf(0.016f) }
 
-    LaunchedEffect(layers, transformers, colorEngine) {
+    LaunchedEffect(layers, transformers, colorEngine, tempoSyncConfig, lfoBank) {
         var prevNanos = 0L
+        var uiTempoThrottle = 0
         while (true) {
             withFrameNanos { nanos ->
                 val dt = if (prevNanos == 0L) 0.016f else ((nanos - prevNanos) / 1_000_000_000f).coerceIn(0.001f, 0.05f)
@@ -109,18 +120,28 @@ fun VisualizerCanvas(
                 lastDtSec = dt
                 elapsedSec += dt
 
+                val tempoSnap = tempoSyncEngine.step(dt, tempoSyncConfig, lfoBank)
+                val visualClock = if (tempoSnap.lockVisualOscillators) tempoSnap.oscillatorTimeSec else elapsedSec
+                oscTimeSec = visualClock
+                uiTempoThrottle++
+                if (uiTempoThrottle >= 3) {
+                    uiTempoThrottle = 0
+                    onTempoSnapshot(tempoSnap)
+                }
+
                 val audio = audioFrameProvider()
                 currentFrame = audio
 
                 val liveTelemetryMap = HashMap<String, Float>(48)
 
                 // Evaluate color engine
-                val hueBase = evaluator.evaluate("c_hue", colorEngine.hueShift, audio, audio.overallRms, elapsedSec, dt)
-                val hueDrift = evaluator.evaluate("c_drift", colorEngine.hueDriftSpeed, audio, audio.overallRms, elapsedSec, dt)
-                val sat = evaluator.evaluate("c_sat", colorEngine.saturation, audio, audio.overallRms, elapsedSec, dt)
-                val luma = evaluator.evaluate("c_luma", colorEngine.contrast, audio, audio.overallRms, elapsedSec, dt)
-                val flash = evaluator.evaluate("c_flash", colorEngine.beatFlash, audio, audio.beatPulse, elapsedSec, dt)
-                accumulatedHueDeg = (accumulatedHueDeg + hueDrift * dt) % 360f
+                val hueBase = evaluator.evaluate("c_hue", colorEngine.hueShift, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+                val hueDrift = evaluator.evaluate("c_drift", colorEngine.hueDriftSpeed, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+                val sat = evaluator.evaluate("c_sat", colorEngine.saturation, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+                val luma = evaluator.evaluate("c_luma", colorEngine.contrast, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+                val flash = evaluator.evaluate("c_flash", colorEngine.beatFlash, audio, audio.beatPulse, elapsedSec, dt, tempoSnap)
+                val driftRate = if (tempoSnap.lockVisualOscillators) (tempoSnap.effectiveBpm / 120f) else 1f
+                accumulatedHueDeg = (accumulatedHueDeg + hueDrift * dt * driftRate) % 360f
 
                 liveTelemetryMap[colorEngine.hueShift.id] = hueBase
                 liveTelemetryMap[colorEngine.hueDriftSpeed.id] = hueDrift
@@ -142,17 +163,17 @@ fun VisualizerCanvas(
                 val activeLayers = layers.filter { it.enabled && (!anySolo || it.solo) }
                 evaluatedLayerList = activeLayers.map { layer ->
                     val slice = evaluator.evaluateAudioSlice(audio, layer.audioFilter)
-                    val op = evaluator.evaluate("${layer.id}_op", layer.opacity, audio, slice, elapsedSec, dt)
-                    val sc = evaluator.evaluate("${layer.id}_sc", layer.scale, audio, slice, elapsedSec, dt)
-                    val rotSpeed = evaluator.evaluate("${layer.id}_rot", layer.rotationSpeed, audio, slice, elapsedSec, dt)
-                    val ox = evaluator.evaluate("${layer.id}_ox", layer.offsetX, audio, slice, elapsedSec, dt)
-                    val oy = evaluator.evaluate("${layer.id}_oy", layer.offsetY, audio, slice, elapsedSec, dt)
-                    val p1 = evaluator.evaluate("${layer.id}_p1", layer.primaryParam, audio, slice, elapsedSec, dt)
-                    val p2 = evaluator.evaluate("${layer.id}_p2", layer.secondaryParam, audio, slice, elapsedSec, dt)
-                    val p3 = evaluator.evaluate("${layer.id}_p3", layer.tertiaryParam, audio, slice, elapsedSec, dt)
+                    val op = evaluator.evaluate("${layer.id}_op", layer.opacity, audio, slice, elapsedSec, dt, tempoSnap)
+                    val sc = evaluator.evaluate("${layer.id}_sc", layer.scale, audio, slice, elapsedSec, dt, tempoSnap)
+                    val rotSpeed = evaluator.evaluate("${layer.id}_rot", layer.rotationSpeed, audio, slice, elapsedSec, dt, tempoSnap)
+                    val ox = evaluator.evaluate("${layer.id}_ox", layer.offsetX, audio, slice, elapsedSec, dt, tempoSnap)
+                    val oy = evaluator.evaluate("${layer.id}_oy", layer.offsetY, audio, slice, elapsedSec, dt, tempoSnap)
+                    val p1 = evaluator.evaluate("${layer.id}_p1", layer.primaryParam, audio, slice, elapsedSec, dt, tempoSnap)
+                    val p2 = evaluator.evaluate("${layer.id}_p2", layer.secondaryParam, audio, slice, elapsedSec, dt, tempoSnap)
+                    val p3 = evaluator.evaluate("${layer.id}_p3", layer.tertiaryParam, audio, slice, elapsedSec, dt, tempoSnap)
 
                     val prevAngle = layerRotations[layer.id] ?: 0f
-                    val nextAngle = (prevAngle + rotSpeed * dt) % 360f
+                    val nextAngle = (prevAngle + rotSpeed * dt * driftRate) % 360f
                     layerRotations[layer.id] = nextAngle
 
                     liveTelemetryMap[layer.opacity.id] = op
@@ -165,7 +186,7 @@ fun VisualizerCanvas(
                     liveTelemetryMap[layer.tertiaryParam.id] = p3
 
                     if (layer.styleType == com.example.model.VisualStyleType.PARTICLE_STARBURST) {
-                        particlePool.step(dt, p2, p3, audio.beatPulse, slice)
+                        particlePool.step(dt * driftRate, p2, p3, audio.beatPulse, slice)
                     }
 
                     layer to EvaluatedLayerParams(
@@ -181,13 +202,14 @@ fun VisualizerCanvas(
                     )
                 }
 
-                // Evaluate transformers
+                // Evaluate transformers (respecting beat quantization if enabled)
+                val quantizeTx = tempoSnap.quantizeTransformerChanges
                 val txMap = HashMap<TransformerType, Triple<Float, Float, Float>>()
                 transformers.filter { it.enabled }.forEach { node ->
                     val slice = evaluator.evaluateAudioSlice(audio, node.audioFilter)
-                    val amt = evaluator.evaluate("${node.id}_amt", node.amount, audio, slice, elapsedSec, dt)
-                    val freq = evaluator.evaluate("${node.id}_freq", node.frequency, audio, slice, elapsedSec, dt)
-                    val drift = evaluator.evaluate("${node.id}_drift", node.phaseOrDrift, audio, slice, elapsedSec, dt)
+                    val amt = evaluator.evaluate("${node.id}_amt", node.amount, audio, slice, elapsedSec, dt, tempoSnap, quantizeTx)
+                    val freq = evaluator.evaluate("${node.id}_freq", node.frequency, audio, slice, elapsedSec, dt, tempoSnap, quantizeTx)
+                    val drift = evaluator.evaluate("${node.id}_drift", node.phaseOrDrift, audio, slice, elapsedSec, dt, tempoSnap, quantizeTx)
 
                     liveTelemetryMap[node.amount.id] = amt
                     liveTelemetryMap[node.frequency.id] = freq
@@ -256,7 +278,7 @@ fun VisualizerCanvas(
                         val effect = agslHolder.buildCompositeRenderEffect(
                             width = size.width,
                             height = size.height,
-                            timeSec = elapsedSec,
+                            timeSec = oscTimeSec,
                             waveFoldAmp = wf?.first ?: 0f,
                             waveFoldFreq = wf?.second ?: 6f,
                             waveFoldSpeed = wf?.third ?: 1f,
@@ -326,7 +348,7 @@ fun VisualizerCanvas(
                                         params = params,
                                         frame = currentFrame,
                                         palette = evaluatedPalette,
-                                        timeSec = elapsedSec,
+                                        timeSec = oscTimeSec,
                                         particlePool = particlePool,
                                         agslHolder = agslHolder,
                                     )
@@ -451,7 +473,7 @@ fun VisualizerCanvas(
                 val cx = size.width * 0.5f
                 val cy = size.height * 0.5f
                 for (r in 0 until ringCount) {
-                    val phase = ((elapsedSec * ripple.third * 0.45f) + r / ringCount.toFloat()) % 1f
+                    val phase = ((oscTimeSec * ripple.third * 0.45f) + r / ringCount.toFloat()) % 1f
                     val col = evaluatedPalette.getOrElse(r % evaluatedPalette.size.coerceAtLeast(1)) { Color.Cyan }
                     drawCircle(
                         color = col.copy(alpha = ((1f - phase) * ripple.first * 0.45f).coerceIn(0f, 0.65f)),

@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ChromaWave"
+rootProject.name = "SoundKandee"
 
 include(":app")

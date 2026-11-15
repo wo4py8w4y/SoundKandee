@@ -1,19 +1,39 @@
 package com.example
 
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import com.example.audio.ConfigurableDspProcessor
+import com.example.audio.DeviceTapConfig
+import com.example.audio.DeviceTapDetector
+import com.example.audio.SynthFallbackConfig
+import com.example.audio.SynthMusicStyle
+import com.example.audio.SyntheticMusicGenerator
+import com.example.audio.TempoSyncEngine
 import com.example.model.AudioFilterScope
+import com.example.model.BeatDivision
 import com.example.model.DspSettings
+import com.example.model.LfoChannelConfig
+import com.example.model.LfoWaveform
 import com.example.model.ModulationDriver
 import com.example.model.ModulationEvaluator
 import com.example.model.PresetCatalog
 import com.example.model.ScopedParam
+import com.example.model.TempoSyncConfig
+import com.example.model.TempoSyncMode
+import com.example.model.TempoSyncSnapshot
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
 class ExampleUnitTest {
 
     @Test
@@ -130,5 +150,153 @@ class ExampleUnitTest {
         assertEquals(original.transformers.size, clonedTx.size)
         assertTrue(clonedTx.first().id != original.transformers.first().id)
     }
+
+    @Test
+    fun tempo_sync_auto_beat_tracks_steady_bpm_and_octave_folds() {
+        val engine = TempoSyncEngine()
+        val cfg = TempoSyncConfig(enabled = true, mode = TempoSyncMode.AUTO_BEAT)
+        // Feed steady 140 BPM onsets (~429ms)
+        var t = 1_000L
+        repeat(8) {
+            engine.onAutoBeatDetected(t)
+            t += 429L
+        }
+        val snap140 = engine.step(0.016f, cfg)
+        assertTrue("Expected auto BPM near 140, got ${snap140.effectiveBpm}", snap140.effectiveBpm in 134f..146f)
+        assertTrue("Expected confidence > 0.4, got ${snap140.confidence}", snap140.confidence > 0.4f)
+
+        // Reset and feed double-time 280 BPM (214ms) -> should octave-fold into 140 BPM
+        engine.resetAutoTracker()
+        t = 10_000L
+        repeat(8) {
+            engine.onAutoBeatDetected(t)
+            t += 214L
+        }
+        val snapFolded = engine.step(0.016f, cfg)
+        assertTrue("Expected octave-folded BPM near 140, got ${snapFolded.effectiveBpm}", snapFolded.effectiveBpm in 132f..148f)
+    }
+
+    @Test
+    fun tap_tempo_computes_bpm_and_locks_phase_to_downbeat() {
+        val engine = TempoSyncEngine()
+        val cfg = TempoSyncConfig(enabled = true, mode = TempoSyncMode.TAP_TEMPO)
+        engine.step(0.123f, cfg) // drift away from zero first
+        engine.recordTap(1_000L)
+        engine.recordTap(1_500L)
+        engine.recordTap(2_000L)
+        val bpm = engine.recordTap(2_500L)
+        assertTrue("Expected tap BPM near 120, got $bpm", bpm in 118f..122f)
+
+        val snap = engine.step(0.001f, cfg)
+        assertTrue("Expected beat phase locked near 0.0 right after tap, got ${snap.beatPhase}", snap.beatPhase < 0.05f)
+        assertTrue("Expected effective BPM near 120, got ${snap.effectiveBpm}", snap.effectiveBpm in 118f..122f)
+    }
+
+    @Test
+    fun modulation_evaluator_locks_lfo_to_bpm_and_quantizes_transformer_changes() {
+        val evaluator = ModulationEvaluator()
+        val engine = TempoSyncEngine()
+        val cfg = TempoSyncConfig(enabled = true, mode = TempoSyncMode.MANUAL_BPM, manualBpm = 120f, lockVisualOscillators = true)
+        val lfoBank = listOf(
+            LfoChannelConfig(id = 1, name = "LFO 1", enabled = true, waveform = LfoWaveform.SAW_UP, tempoSynced = true, beatDivision = BeatDivision.DIV_QUARTER, depth = 1f),
+            LfoChannelConfig(id = 2, name = "LFO 2", enabled = true),
+            LfoChannelConfig(id = 3, name = "LFO 3", enabled = true),
+        )
+        val busParam = ScopedParam(
+            id = "tx_amt",
+            label = "Amount",
+            hardMin = 0f,
+            hardMax = 2f,
+            scopeMin = 0.2f,
+            scopeMax = 1.4f,
+            driver = ModulationDriver.LFO_BUS_1,
+            attackMs = 0f,
+            releaseMs = 0f,
+        )
+        val frame = com.example.audio.AudioFrame(isSignalActive = true, bass = 0.5f)
+        val snap1 = engine.step(0.05f, cfg, lfoBank)
+        val v1 = evaluator.evaluate("k_bus", busParam, frame, 0.5f, 0.05f, 0.016f, snap1, forceTempoQuantize = false)
+        assertTrue("LFO bus output $v1 out of [0.2, 1.4]", v1 in 0.2f..1.4f)
+
+        // Now test beat-hold quantization for transformer parameter changes
+        val qParam = ScopedParam(
+            id = "tx_quant",
+            label = "Warp",
+            hardMin = 0f,
+            hardMax = 1f,
+            scopeMin = 0f,
+            scopeMax = 1f,
+            driver = ModulationDriver.LFO_SAW_UP,
+            lfoTempoSynced = true,
+            beatDivision = BeatDivision.DIV_QUARTER,
+            attackMs = 0f,
+            releaseMs = 0f,
+        )
+        // With DIV_QUARTER (1 cycle/beat), lock tick is floor(totalBeats * 1)
+        val holdSnapA = TempoSyncSnapshot(
+            enabled = true,
+            effectiveBpm = 120f,
+            totalBeats = 1.15,
+            beatPhase = 0.15f,
+            lockVisualOscillators = true,
+            quantizeTransformerChanges = true,
+            transformerQuantizeDivision = BeatDivision.DIV_QUARTER,
+        )
+        val holdSnapB = holdSnapA.copy(totalBeats = 1.75, beatPhase = 0.75f)
+        val holdSnapNextStep = holdSnapA.copy(totalBeats = 2.25, beatPhase = 0.25f)
+
+        val q1 = evaluator.evaluate("q_tx", qParam, frame, 0.2f, 1.0f, 0.016f, holdSnapA, forceTempoQuantize = true)
+        val q2 = evaluator.evaluate("q_tx", qParam, frame, 0.9f, 1.1f, 0.016f, holdSnapB, forceTempoQuantize = true)
+        val q3 = evaluator.evaluate("q_tx", qParam, frame, 0.9f, 1.2f, 0.016f, holdSnapNextStep, forceTempoQuantize = true)
+
+        assertEquals("Quantized value must remain locked within the same 1/4 beat step", q1, q2, 1e-4f)
+        assertTrue("Quantized value must step on next beat boundary (q2=$q2, q3=$q3)", q3 != q2)
+    }
+
+    @Test
+    fun device_tap_detector_triggers_on_impulse_and_respects_cooldown() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = DeviceTapDetector(context) {}
+        detector.config = DeviceTapConfig(enabled = true, sensitivityThreshold = 5.0f, cooldownMs = 600L)
+
+        // Gentle rest sample must not trigger
+        assertFalse(detector.processSample(0.2f, 0.1f, 0.3f, isLinearAcceleration = true, timestampMs = 1_000L))
+        // Sharp physical tap impulse triggers
+        assertTrue(detector.processSample(6.8f, 1.2f, 0.5f, isLinearAcceleration = true, timestampMs = 1_100L))
+        // Bounce inside cooldown must not re-trigger
+        assertFalse(detector.processSample(7.2f, 0.5f, 0.4f, isLinearAcceleration = true, timestampMs = 1_400L))
+        // Tap after cooldown triggers again
+        assertTrue(detector.processSample(6.1f, 2.0f, 0.2f, isLinearAcceleration = true, timestampMs = 1_800L))
+    }
+
+    @Test
+    fun synthetic_music_generator_produces_active_dsp_spectrum_and_beats() {
+        val generator = SyntheticMusicGenerator(44100)
+        val dsp = ConfigurableDspProcessor(fftSize = 1024)
+        val synthCfg = SynthFallbackConfig(
+            enabled = true,
+            style = SynthMusicStyle.TECHNO_PULSE,
+            intensity = 0.9f,
+            tempoBpm = 128f,
+        )
+        val settings = DspSettings(noiseFloor = 0.01f, beatThreshold = 1.25f)
+
+        var activeFrames = 0
+        var beatOnsets = 0
+        var peakHighEnergy = 0f
+
+        repeat(90) { idx ->
+            val pcm = generator.generateNextBuffer(1024, synthCfg)
+            val frame = dsp.processPcm16(pcm, pcm.size, 44100, settings, nowMs = (idx + 1) * 23L)
+            if (frame.isSignalActive) activeFrames++
+            if (frame.beatOnset) beatOnsets++
+            if (frame.treble > peakHighEnergy) peakHighEnergy = frame.treble
+        }
+
+        assertTrue("Expected most synthetic music frames to be active, got $activeFrames/90", activeFrames > 75)
+        assertTrue("Expected synthetic techno beats to trigger beatOnset, got $beatOnsets", beatOnsets >= 2)
+        assertTrue("Expected synthetic hi-hats/synths to excite treble spectrum bands", peakHighEnergy > 0.02f)
+    }
 }
+
 

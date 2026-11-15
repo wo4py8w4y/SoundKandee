@@ -6,16 +6,25 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.audio.DeviceTapAction
+import com.example.audio.DeviceTapConfig
+import com.example.audio.SynthFallbackConfig
+import com.example.audio.SynthMusicStyle
 import com.example.model.AudioFilterScope
 import com.example.model.AudioSourceType
+import com.example.model.BeatDivision
 import com.example.model.ColorEngineConfig
 import com.example.model.DspSettings
 import com.example.model.FftWindowType
 import com.example.model.LayerBlendMode
+import com.example.model.LfoChannelConfig
+import com.example.model.LfoWaveform
 import com.example.model.ModulationDriver
 import com.example.model.PresetCatalog
 import com.example.model.ResponseCurve
 import com.example.model.ScopedParam
+import com.example.model.TempoSyncConfig
+import com.example.model.TempoSyncMode
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
 import com.example.model.VisualLayer
@@ -31,6 +40,9 @@ private val Context.chromaDataStore: DataStore<Preferences> by preferencesDataSt
 data class PersistedWorkspace(
     val audioSource: AudioSourceType = AudioSourceType.OUTPUT_MIX,
     val dspSettings: DspSettings = DspSettings(),
+    val lfoBank: List<LfoChannelConfig> = LfoChannelConfig.defaults(),
+    val deviceTapConfig: DeviceTapConfig = DeviceTapConfig(),
+    val synthFallbackConfig: SynthFallbackConfig = SynthFallbackConfig(),
     val layers: List<VisualLayer> = PresetCatalog.presets.first().layers,
     val transformers: List<TransformerNode> = PresetCatalog.presets.first().transformers,
     val colorEngine: ColorEngineConfig = PresetCatalog.defaultColorEngine(PresetCatalog.presets.first().paletteId),
@@ -88,6 +100,7 @@ class PreferencesRepository(private val context: Context) {
         put("createdAtEpochMs", p.createdAtEpochMs)
         put("updatedAtEpochMs", p.updatedAtEpochMs)
         put("dsp", encodeDsp(p.dspSettings))
+        put("lfoBank", encodeLfoBank(p.lfoBank))
         put("layers", JSONArray().apply { p.layers.forEach { put(encodeLayer(it)) } })
         put("transformers", JSONArray().apply { p.transformers.forEach { put(encodeTransformer(it)) } })
         put("color", encodeColor(p.colorEngine))
@@ -99,6 +112,7 @@ class PreferencesRepository(private val context: Context) {
         val name = obj.optString("name").ifBlank { "Custom Preset" }
         val paletteId = obj.optString("paletteId", "acid_sunset")
         val dsp = decodeDsp(obj.optJSONObject("dsp"))
+        val lfoBank = decodeLfoBank(obj.optJSONArray("lfoBank"))
         val layersArr = obj.optJSONArray("layers")
         val layers = if (layersArr != null && layersArr.length() > 0) {
             (0 until layersArr.length()).mapNotNull { decodeLayer(layersArr.optJSONObject(it)) }
@@ -122,6 +136,7 @@ class PreferencesRepository(private val context: Context) {
             paletteId = color.paletteId,
             colorEngine = color,
             dspSettings = dsp,
+            lfoBank = lfoBank,
             isBuiltIn = false,
             createdAtEpochMs = obj.optLong("createdAtEpochMs", 0L),
             updatedAtEpochMs = obj.optLong("updatedAtEpochMs", 0L),
@@ -136,6 +151,7 @@ class PreferencesRepository(private val context: Context) {
         put("beatCooldownMs", d.beatCooldownMs)
         put("bassTiltDb", d.bassTiltDb.toDouble())
         put("globalSmoothing", d.globalSmoothing.toDouble())
+        put("tempoSync", encodeTempoSync(d.tempoSync))
     }
 
     private fun decodeDsp(dspObj: JSONObject?): DspSettings {
@@ -148,7 +164,71 @@ class PreferencesRepository(private val context: Context) {
             beatCooldownMs = dspObj.optInt("beatCooldownMs", 140),
             bassTiltDb = dspObj.optDouble("bassTiltDb", 3.0).toFloat(),
             globalSmoothing = dspObj.optDouble("globalSmoothing", 0.55).toFloat(),
+            tempoSync = decodeTempoSync(dspObj.optJSONObject("tempoSync")),
         )
+    }
+
+    private fun encodeTempoSync(t: TempoSyncConfig): JSONObject = JSONObject().apply {
+        put("enabled", t.enabled)
+        put("mode", t.mode.name)
+        put("manualBpm", t.manualBpm.toDouble())
+        put("tapBpm", t.tapBpm.toDouble())
+        put("bpmMultiplier", t.bpmMultiplier.toDouble())
+        put("lockVisualOscillators", t.lockVisualOscillators)
+        put("quantizeTransformerChanges", t.quantizeTransformerChanges)
+        put("transformerQuantizeDivision", t.transformerQuantizeDivision.name)
+    }
+
+    private fun decodeTempoSync(obj: JSONObject?): TempoSyncConfig {
+        if (obj == null) return TempoSyncConfig()
+        return TempoSyncConfig(
+            enabled = obj.optBoolean("enabled", true),
+            mode = enumOrDefault(obj.optString("mode"), TempoSyncMode.AUTO_BEAT),
+            manualBpm = obj.optDouble("manualBpm", 120.0).toFloat().coerceIn(40f, 220f),
+            tapBpm = obj.optDouble("tapBpm", 120.0).toFloat().coerceIn(40f, 220f),
+            bpmMultiplier = obj.optDouble("bpmMultiplier", 1.0).toFloat().coerceIn(0.25f, 4f),
+            lockVisualOscillators = obj.optBoolean("lockVisualOscillators", true),
+            quantizeTransformerChanges = obj.optBoolean("quantizeTransformerChanges", false),
+            transformerQuantizeDivision = enumOrDefault(obj.optString("transformerQuantizeDivision"), BeatDivision.DIV_QUARTER),
+        )
+    }
+
+    private fun encodeLfoBank(bank: List<LfoChannelConfig>): JSONArray = JSONArray().apply {
+        bank.forEach { ch ->
+            put(JSONObject().apply {
+                put("id", ch.id)
+                put("name", ch.name)
+                put("enabled", ch.enabled)
+                put("waveform", ch.waveform.name)
+                put("tempoSynced", ch.tempoSynced)
+                put("beatDivision", ch.beatDivision.name)
+                put("rateHz", ch.rateHz.toDouble())
+                put("phaseDeg", ch.phaseDeg.toDouble())
+                put("depth", ch.depth.toDouble())
+                put("dutyCycle", ch.dutyCycle.toDouble())
+                put("retriggerOnBeat", ch.retriggerOnBeat)
+            })
+        }
+    }
+
+    private fun decodeLfoBank(arr: JSONArray?): List<LfoChannelConfig> {
+        val defaults = LfoChannelConfig.defaults()
+        if (arr == null || arr.length() == 0) return defaults
+        return defaults.mapIndexed { idx, fallback ->
+            val obj = arr.optJSONObject(idx) ?: return@mapIndexed fallback
+            fallback.copy(
+                name = obj.optString("name", fallback.name).ifBlank { fallback.name },
+                enabled = obj.optBoolean("enabled", fallback.enabled),
+                waveform = enumOrDefault(obj.optString("waveform"), fallback.waveform),
+                tempoSynced = obj.optBoolean("tempoSynced", fallback.tempoSynced),
+                beatDivision = enumOrDefault(obj.optString("beatDivision"), fallback.beatDivision),
+                rateHz = obj.optDouble("rateHz", fallback.rateHz.toDouble()).toFloat().coerceIn(0.05f, 12f),
+                phaseDeg = obj.optDouble("phaseDeg", fallback.phaseDeg.toDouble()).toFloat().coerceIn(0f, 360f),
+                depth = obj.optDouble("depth", fallback.depth.toDouble()).toFloat().coerceIn(0f, 1f),
+                dutyCycle = obj.optDouble("dutyCycle", fallback.dutyCycle.toDouble()).toFloat().coerceIn(0.1f, 0.9f),
+                retriggerOnBeat = obj.optBoolean("retriggerOnBeat", fallback.retriggerOnBeat),
+            )
+        }
     }
 
     private fun encodeWorkspace(w: PersistedWorkspace): String {
@@ -160,6 +240,20 @@ class PreferencesRepository(private val context: Context) {
             root.put("activePresetId", JSONObject.NULL)
         }
         root.put("dsp", encodeDsp(w.dspSettings))
+        root.put("lfoBank", encodeLfoBank(w.lfoBank))
+        root.put("deviceTap", JSONObject().apply {
+            put("enabled", w.deviceTapConfig.enabled)
+            put("action", w.deviceTapConfig.action.name)
+            put("sensitivityThreshold", w.deviceTapConfig.sensitivityThreshold.toDouble())
+            put("cooldownMs", w.deviceTapConfig.cooldownMs)
+        })
+        root.put("synthFallback", JSONObject().apply {
+            put("enabled", w.synthFallbackConfig.enabled)
+            put("style", w.synthFallbackConfig.style.name)
+            put("intensity", w.synthFallbackConfig.intensity.toDouble())
+            put("silenceDelaySec", w.synthFallbackConfig.silenceDelaySec.toDouble())
+            put("tempoBpm", w.synthFallbackConfig.tempoBpm.toDouble())
+        })
         root.put("layers", JSONArray().apply {
             w.layers.forEach { put(encodeLayer(it)) }
         })
@@ -181,6 +275,26 @@ class PreferencesRepository(private val context: Context) {
             null
         }
         val dsp = decodeDsp(root.optJSONObject("dsp"))
+        val lfoBank = decodeLfoBank(root.optJSONArray("lfoBank"))
+        val tapObj = root.optJSONObject("deviceTap")
+        val deviceTap = if (tapObj != null) {
+            DeviceTapConfig(
+                enabled = tapObj.optBoolean("enabled", true),
+                action = enumOrDefault(tapObj.optString("action"), DeviceTapAction.RANDOMIZE_OPTIONS),
+                sensitivityThreshold = tapObj.optDouble("sensitivityThreshold", 5.5).toFloat().coerceIn(2.5f, 14f),
+                cooldownMs = tapObj.optLong("cooldownMs", 650L).coerceIn(250L, 2000L),
+            )
+        } else DeviceTapConfig()
+        val synthObj = root.optJSONObject("synthFallback")
+        val synthFallback = if (synthObj != null) {
+            SynthFallbackConfig(
+                enabled = synthObj.optBoolean("enabled", true),
+                style = enumOrDefault(synthObj.optString("style"), SynthMusicStyle.TECHNO_PULSE),
+                intensity = synthObj.optDouble("intensity", 0.85).toFloat().coerceIn(0.2f, 1.2f),
+                silenceDelaySec = synthObj.optDouble("silenceDelaySec", 1.5).toFloat().coerceIn(0.2f, 8.0f),
+                tempoBpm = synthObj.optDouble("tempoBpm", 126.0).toFloat().coerceIn(60f, 180f),
+            )
+        } else SynthFallbackConfig()
 
         val layersArr = root.optJSONArray("layers")
         val layers = if (layersArr != null && layersArr.length() > 0) {
@@ -198,6 +312,9 @@ class PreferencesRepository(private val context: Context) {
         return PersistedWorkspace(
             audioSource = source,
             dspSettings = dsp,
+            lfoBank = lfoBank,
+            deviceTapConfig = deviceTap,
+            synthFallbackConfig = synthFallback,
             layers = layers,
             transformers = transformers,
             colorEngine = color,
@@ -218,6 +335,10 @@ class PreferencesRepository(private val context: Context) {
         put("attackMs", p.attackMs.toDouble())
         put("releaseMs", p.releaseMs.toDouble())
         put("lfoHz", p.lfoHz.toDouble())
+        put("lfoPhaseDeg", p.lfoPhaseDeg.toDouble())
+        put("lfoTempoSynced", p.lfoTempoSynced)
+        put("beatDivision", p.beatDivision.name)
+        put("tempoQuantizeHold", p.tempoQuantizeHold)
         put("inverted", p.inverted)
         put("locked", p.locked)
     }
@@ -231,7 +352,11 @@ class PreferencesRepository(private val context: Context) {
             curve = enumOrDefault(obj.optString("curve"), fallback.curve),
             attackMs = obj.optDouble("attackMs", fallback.attackMs.toDouble()).toFloat().coerceIn(5f, 500f),
             releaseMs = obj.optDouble("releaseMs", fallback.releaseMs.toDouble()).toFloat().coerceIn(15f, 1500f),
-            lfoHz = obj.optDouble("lfoHz", fallback.lfoHz.toDouble()).toFloat().coerceIn(0.05f, 8f),
+            lfoHz = obj.optDouble("lfoHz", fallback.lfoHz.toDouble()).toFloat().coerceIn(0.05f, 12f),
+            lfoPhaseDeg = obj.optDouble("lfoPhaseDeg", fallback.lfoPhaseDeg.toDouble()).toFloat().coerceIn(0f, 360f),
+            lfoTempoSynced = obj.optBoolean("lfoTempoSynced", fallback.lfoTempoSynced),
+            beatDivision = enumOrDefault(obj.optString("beatDivision"), fallback.beatDivision),
+            tempoQuantizeHold = obj.optBoolean("tempoQuantizeHold", fallback.tempoQuantizeHold),
             inverted = obj.optBoolean("inverted", fallback.inverted),
             locked = obj.optBoolean("locked", fallback.locked),
         )

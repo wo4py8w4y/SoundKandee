@@ -13,6 +13,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,9 +23,11 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -50,6 +53,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,13 +63,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.model.AudioSourceType
 import com.example.model.CaptureStatus
 import com.example.model.ModulationEvaluator
@@ -89,11 +102,38 @@ fun ChromaWaveScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val haptics = LocalHapticFeedback.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val audioFrame by viewModel.audioFrame.collectAsStateWithLifecycle()
+    val tempoSnapshot by viewModel.tempoSnapshot.collectAsStateWithLifecycle()
 
     var pendingSourceAfterPermission by remember { mutableStateOf<AudioSourceType?>(null) }
     var showSavePresetDialog by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner, viewModel.deviceTapDetector) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.deviceTapDetector.syncListeningState()
+                Lifecycle.Event.ON_PAUSE -> viewModel.deviceTapDetector.stop()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            viewModel.deviceTapDetector.syncListeningState()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.deviceTapDetector.stop()
+        }
+    }
+
+    LaunchedEffect(uiState.lastDeviceTapEventMs) {
+        if (uiState.lastDeviceTapEventMs > 0L) {
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+    }
 
     val mediaProjectionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult(),
@@ -172,8 +212,12 @@ fun ChromaWaveScreen(
                     layers = uiState.layers,
                     transformers = uiState.transformers,
                     colorEngine = uiState.colorEngine,
+                    tempoSyncConfig = uiState.dspSettings.tempoSync,
+                    lfoBank = uiState.lfoBank,
+                    tempoSyncEngine = viewModel.tempoSyncEngine,
                     audioFrameProvider = { viewModel.audioFrame.value },
                     onLiveEvaluatedValues = { map -> viewModel.updateLiveEvaluatedValues(map) },
+                    onTempoSnapshot = viewModel::updateTempoSnapshot,
                     onTapCanvas = { viewModel.toggleZenMode() },
                     modifier = Modifier
                         .fillMaxSize()
@@ -209,28 +253,43 @@ fun ChromaWaveScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.weight(1f),
                             ) {
+                                val statusRingColor = when (uiState.captureStatus) {
+                                    is CaptureStatus.Active ->
+                                        if (audioFrame.beatPulse > 0.35f) AcidMagenta else ElectricCyan
+                                    is CaptureStatus.SyntheticFallback -> SolarAmber
+                                    is CaptureStatus.SilentSignal -> SolarAmber
+                                    is CaptureStatus.Error -> ErrorCoral
+                                    else -> LuminousBorder
+                                }
                                 Box(
                                     modifier = Modifier
-                                        .size(10.dp)
+                                        .size(34.dp)
                                         .clip(CircleShape)
-                                        .background(
-                                            when (uiState.captureStatus) {
-                                                is CaptureStatus.Active ->
-                                                    if (audioFrame.beatPulse > 0.35f) AcidMagenta else ElectricCyan
-                                                is CaptureStatus.SilentSignal -> SolarAmber
-                                                is CaptureStatus.Error -> ErrorCoral
-                                                else -> MistSecondary
-                                            }
-                                        ),
-                                )
-                                Column {
-                                    Text(
-                                        text = "ChromaWave",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = Color.White,
+                                        .border(1.5.dp, statusRingColor, CircleShape)
+                                        .padding(1.5.dp),
+                                ) {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.soundkandee_icon_1794726411343),
+                                        contentDescription = "SoundKandee candy K-ee emblem",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(CircleShape),
+                                    )
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.img_soundkandee_wordmark),
+                                        contentDescription = "SoundKandee",
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier
+                                            .height(26.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .testTag("soundkandee_logo"),
                                     )
                                     val statusText = when (val st = uiState.captureStatus) {
                                         is CaptureStatus.Active -> "${st.sourceLabel} • ${audioFrame.rmsDb.toInt()}dB • ${ModulationEvaluator.formatHz(audioFrame.dominantHz)}"
+                                        is CaptureStatus.SyntheticFallback -> "Synth Idle • ${st.styleLabel} • ${audioFrame.rmsDb.toInt()}dB"
                                         is CaptureStatus.SilentSignal -> "${st.sourceLabel} • Listening (quiet)"
                                         CaptureStatus.RequestingPermission -> "Permission needed"
                                         is CaptureStatus.Error -> "Audio issue"
@@ -239,7 +298,7 @@ fun ChromaWaveScreen(
                                     Text(
                                         text = statusText,
                                         style = MonoTelemetryStyle,
-                                        color = MistSecondary,
+                                        color = if (uiState.captureStatus is CaptureStatus.SyntheticFallback) SolarAmber else MistSecondary,
                                         maxLines = 1,
                                     )
                                 }
@@ -249,10 +308,33 @@ fun ChromaWaveScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(ElevatedSurface.copy(alpha = 0.85f))
+                                        .border(
+                                            1.dp,
+                                            if (tempoSnapshot.beatInBar == 0 && tempoSnapshot.beatPhase < 0.25f) AcidMagenta else ElectricCyan.copy(alpha = 0.55f),
+                                            RoundedCornerShape(10.dp),
+                                        )
+                                        .clickable { viewModel.tapTempo() }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        .testTag("hud_tap_tempo_btn"),
+                                ) {
+                                    Text(
+                                        text = "${tempoSnapshot.effectiveBpm.toInt()} BPM",
+                                        style = MonoTelemetryStyle.copy(fontWeight = FontWeight.Bold),
+                                        color = ElectricCyan,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
+                                }
                                 IconButton(
                                     onClick = { viewModel.mutate() },
                                     modifier = Modifier
-                                        .size(42.dp)
+                                        .size(48.dp)
                                         .testTag("mutate_button"),
                                 ) {
                                     Icon(
@@ -264,7 +346,7 @@ fun ChromaWaveScreen(
                                 IconButton(
                                     onClick = { viewModel.randomize() },
                                     modifier = Modifier
-                                        .size(42.dp)
+                                        .size(48.dp)
                                         .testTag("randomize_button"),
                                 ) {
                                     Icon(
@@ -276,7 +358,7 @@ fun ChromaWaveScreen(
                                 IconButton(
                                     onClick = { viewModel.toggleZenMode() },
                                     modifier = Modifier
-                                        .size(42.dp)
+                                        .size(48.dp)
                                         .testTag("zen_mode_button"),
                                 ) {
                                     Icon(
@@ -324,12 +406,27 @@ fun ChromaWaveScreen(
                         StudioDock(
                             uiState = uiState,
                             audioFrame = audioFrame,
+                            tempoSnapshot = tempoSnapshot,
                             liveValues = viewModel.liveEvaluatedValues,
+                            hasTapHardwareSensor = viewModel.deviceTapDetector.hasHardwareSensor,
                             isWideScreen = false,
                             onSelectTab = viewModel::setActiveTab,
                             onToggleExpanded = viewModel::toggleDockExpanded,
                             onSelectAudioSource = requestAudioSource,
                             onUpdateDsp = viewModel::updateDspSettings,
+                            onTapTempo = { viewModel.tapTempo() },
+                            onSetTempoMode = viewModel::setTempoMode,
+                            onSetManualBpm = viewModel::setManualBpm,
+                            onHalveBpm = viewModel::halveBpm,
+                            onDoubleBpm = viewModel::doubleBpm,
+                            onResetBpmMultiplier = viewModel::resetBpmMultiplier,
+                            onSyncDownbeatPhase = viewModel::syncDownbeatPhase,
+                            onUpdateTempoSyncConfig = viewModel::updateTempoSyncConfig,
+                            onUpdateLfoChannel = viewModel::updateLfoChannel,
+                            onAssignQuickLfoTarget = viewModel::assignQuickTargetToLfoBus,
+                            onUpdateSynthFallback = viewModel::updateSynthFallbackConfig,
+                            onUpdateDeviceTap = viewModel::updateDeviceTapConfig,
+                            onSimulateDeviceTapNow = { viewModel.onPhysicalDeviceTapTriggered() },
                             onLoadPreset = viewModel::loadPreset,
                             onPrevPreset = viewModel::switchToPreviousPreset,
                             onNextPreset = viewModel::switchToNextPreset,
@@ -364,12 +461,27 @@ fun ChromaWaveScreen(
                 StudioDock(
                     uiState = uiState,
                     audioFrame = audioFrame,
+                    tempoSnapshot = tempoSnapshot,
                     liveValues = viewModel.liveEvaluatedValues,
+                    hasTapHardwareSensor = viewModel.deviceTapDetector.hasHardwareSensor,
                     isWideScreen = true,
                     onSelectTab = viewModel::setActiveTab,
                     onToggleExpanded = viewModel::toggleDockExpanded,
                     onSelectAudioSource = requestAudioSource,
                     onUpdateDsp = viewModel::updateDspSettings,
+                    onTapTempo = { viewModel.tapTempo() },
+                    onSetTempoMode = viewModel::setTempoMode,
+                    onSetManualBpm = viewModel::setManualBpm,
+                    onHalveBpm = viewModel::halveBpm,
+                    onDoubleBpm = viewModel::doubleBpm,
+                    onResetBpmMultiplier = viewModel::resetBpmMultiplier,
+                    onSyncDownbeatPhase = viewModel::syncDownbeatPhase,
+                    onUpdateTempoSyncConfig = viewModel::updateTempoSyncConfig,
+                    onUpdateLfoChannel = viewModel::updateLfoChannel,
+                    onAssignQuickLfoTarget = viewModel::assignQuickTargetToLfoBus,
+                    onUpdateSynthFallback = viewModel::updateSynthFallbackConfig,
+                    onUpdateDeviceTap = viewModel::updateDeviceTapConfig,
+                    onSimulateDeviceTapNow = { viewModel.onPhysicalDeviceTapTriggered() },
                     onLoadPreset = viewModel::loadPreset,
                     onPrevPreset = viewModel::switchToPreviousPreset,
                     onNextPreset = viewModel::switchToNextPreset,

@@ -13,6 +13,7 @@ sealed interface CaptureStatus {
     data object RequestingPermission : CaptureStatus
     data class Active(val sourceLabel: String, val detail: String) : CaptureStatus
     data class SilentSignal(val sourceLabel: String) : CaptureStatus
+    data class SyntheticFallback(val styleLabel: String) : CaptureStatus
     data class Error(val message: String) : CaptureStatus
 }
 
@@ -31,6 +32,7 @@ data class DspSettings(
     val beatCooldownMs: Int = 140,
     val bassTiltDb: Float = 3f,
     val globalSmoothing: Float = 0.55f,
+    val tempoSync: TempoSyncConfig = TempoSyncConfig(),
 )
 
 enum class LayerBlendMode(val label: String, val composeBlendMode: BlendMode) {
@@ -426,6 +428,7 @@ data class VisualizerPreset(
     val paletteId: String,
     val colorEngine: ColorEngineConfig = PresetCatalog.defaultColorEngine(paletteId),
     val dspSettings: DspSettings = DspSettings(),
+    val lfoBank: List<LfoChannelConfig> = LfoChannelConfig.defaults(),
     val isBuiltIn: Boolean = true,
     val createdAtEpochMs: Long = 0L,
     val updatedAtEpochMs: Long = 0L,

@@ -296,38 +296,166 @@ fun ScopedParamControl(
                     }
                 }
 
-                if (param.driver == ModulationDriver.LFO_SINE ||
-                    param.driver == ModulationDriver.LFO_TRIANGLE ||
-                    param.driver == ModulationDriver.CHAOS_DRIFT
-                ) {
-                    CompactLabeledSlider(
-                        label = "LFO Rate",
-                        valueText = "${String.format("%.2f", param.lfoHz)} Hz",
-                        value = param.lfoHz,
-                        range = 0.05f..6.0f,
-                        onValueChange = { onParamChange(param.copy(lfoHz = it)) },
-                    )
-                } else if (param.driver != ModulationDriver.FIXED) {
+                if (param.driver.isLocalLfo || param.driver.isTempoDriver) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (param.driver.isLocalLfo) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (param.lfoTempoSynced) ElectricCyan.copy(alpha = 0.2f) else HighestSurface)
+                                    .border(
+                                        1.dp,
+                                        if (param.lfoTempoSynced) ElectricCyan else LuminousBorder,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .clickable { onParamChange(param.copy(lfoTempoSynced = !param.lfoTempoSynced)) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("param_tempo_sync_${param.id}"),
+                            ) {
+                                Text(
+                                    text = if (param.lfoTempoSynced) "BPM Sync" else "Free Hz",
+                                    style = MonoTelemetryStyle,
+                                    color = if (param.lfoTempoSynced) ElectricCyan else MistSecondary,
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (param.tempoQuantizeHold) AcidMagenta.copy(alpha = 0.22f) else HighestSurface)
+                                .border(
+                                    1.dp,
+                                    if (param.tempoQuantizeHold) AcidMagenta else LuminousBorder,
+                                    RoundedCornerShape(8.dp),
+                                )
+                                .clickable { onParamChange(param.copy(tempoQuantizeHold = !param.tempoQuantizeHold)) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .testTag("param_quantize_${param.id}"),
+                        ) {
+                            Text(
+                                text = "Beat Hold",
+                                style = MonoTelemetryStyle,
+                                color = if (param.tempoQuantizeHold) AcidMagenta else MistSecondary,
+                            )
+                        }
+                    }
+
+                    if (param.lfoTempoSynced || param.driver.isTempoDriver || param.tempoQuantizeHold) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            com.example.model.BeatDivision.entries.forEach { div ->
+                                val selected = param.beatDivision == div
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) ElectricCyan.copy(alpha = 0.2f) else HighestSurface)
+                                        .border(1.dp, if (selected) ElectricCyan else LuminousBorder, RoundedCornerShape(8.dp))
+                                        .clickable { onParamChange(param.copy(beatDivision = div)) }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                ) {
+                                    Text(div.label, style = MonoTelemetryStyle, color = if (selected) ElectricCyan else MistSecondary)
+                                }
+                            }
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        if (param.driver.isLocalLfo && !param.lfoTempoSynced) {
+                            CompactLabeledSlider(
+                                label = "LFO Rate",
+                                valueText = "${String.format("%.2f", param.lfoHz)} Hz",
+                                value = param.lfoHz,
+                                range = 0.05f..12.0f,
+                                onValueChange = { onParamChange(param.copy(lfoHz = it)) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                         CompactLabeledSlider(
-                            label = "Attack",
-                            valueText = "${param.attackMs.toInt()}ms",
-                            value = param.attackMs,
-                            range = 5f..400f,
-                            onValueChange = { onParamChange(param.copy(attackMs = it)) },
+                            label = "Phase",
+                            valueText = "${param.lfoPhaseDeg.toInt()}°",
+                            value = param.lfoPhaseDeg,
+                            range = 0f..360f,
+                            onValueChange = { onParamChange(param.copy(lfoPhaseDeg = it)) },
                             modifier = Modifier.weight(1f),
                         )
-                        CompactLabeledSlider(
-                            label = "Release",
-                            valueText = "${param.releaseMs.toInt()}ms",
-                            value = param.releaseMs,
-                            range = 15f..1200f,
-                            onValueChange = { onParamChange(param.copy(releaseMs = it)) },
-                            modifier = Modifier.weight(1f),
+                    }
+                } else if (param.driver != ModulationDriver.FIXED) {
+                    if (param.driver.isGlobalLfoBus) {
+                        Text(
+                            text = "Driven by Master ${param.driver.label} (edit shape & BPM div in LFO tab)",
+                            style = MonoTelemetryStyle,
+                            color = ElectricCyan,
                         )
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CompactLabeledSlider(
+                                label = "Attack",
+                                valueText = "${param.attackMs.toInt()}ms",
+                                value = param.attackMs,
+                                range = 5f..400f,
+                                onValueChange = { onParamChange(param.copy(attackMs = it)) },
+                                modifier = Modifier.weight(1f),
+                            )
+                            CompactLabeledSlider(
+                                label = "Release",
+                                valueText = "${param.releaseMs.toInt()}ms",
+                                value = param.releaseMs,
+                                range = 15f..1200f,
+                                onValueChange = { onParamChange(param.copy(releaseMs = it)) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Step-Lock to Beat Grid", style = MonoTelemetryStyle, color = MistSecondary)
+                        Switch(
+                            checked = param.tempoQuantizeHold,
+                            onCheckedChange = { onParamChange(param.copy(tempoQuantizeHold = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = AcidMagenta),
+                            modifier = Modifier.testTag("param_quantize_${param.id}"),
+                        )
+                    }
+                    if (param.tempoQuantizeHold) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            com.example.model.BeatDivision.entries.forEach { div ->
+                                val selected = param.beatDivision == div
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) AcidMagenta.copy(alpha = 0.22f) else HighestSurface)
+                                        .border(1.dp, if (selected) AcidMagenta else LuminousBorder, RoundedCornerShape(8.dp))
+                                        .clickable { onParamChange(param.copy(beatDivision = div)) }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                ) {
+                                    Text(div.label, style = MonoTelemetryStyle, color = if (selected) AcidMagenta else MistSecondary)
+                                }
+                            }
+                        }
                     }
                 }
             }

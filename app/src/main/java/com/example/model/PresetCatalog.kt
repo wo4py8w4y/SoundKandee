@@ -464,7 +464,12 @@ object PresetCatalog {
             ModulationDriver.BEAT_PULSE,
             ModulationDriver.SPECTRAL_CENTROID,
             ModulationDriver.LFO_SINE,
+            ModulationDriver.LFO_TRIANGLE,
+            ModulationDriver.LFO_SAW_UP,
+            ModulationDriver.LFO_SAMPLE_HOLD,
             ModulationDriver.CHAOS_DRIFT,
+            ModulationDriver.LFO_BUS_1,
+            ModulationDriver.LFO_BUS_2,
         )
 
         fun randScope(p: ScopedParam): ScopedParam {

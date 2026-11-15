@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SoundKandee — Blow-by-Blow Architecture &amp; Code Oddities</title>
+  <meta name="description" content="Complete engineering walkthrough and decision rationales for every unusual code path, hardware/software split pipeline, DSP dual ingestion path, and zero-recomposition frame loop in SoundKandee." />
+  <link rel="icon" type="image/jpeg" href="assets/soundkandee-icon.jpg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a href="index.html" class="brand-lockup">
+        <img src="assets/soundkandee-icon.jpg" alt="SoundKandee Kee icon" class="brand-icon" />
+        <span class="brand-title">Sound<span>Kandee</span></span>
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="index.html" class="nav-link">Product</a>
+        <a href="index.html#features" class="nav-link">Features</a>
+        <a href="index.html#foss" class="nav-link">FOSS Audit</a>
+        <a href="architecture.html" class="nav-link active">Architecture &amp; Oddities</a>
+        <a href="architecture.md" class="nav-cta mono">Raw Markdown</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container arch-layout">
+    <aside class="arch-sidebar">
+      <h3>Engineering Index</h3>
+      <ul>
+        <li><a href="#pipeline">1. End-to-End Signal Flow</a></li>
+        <li><a href="#oddity-1">Oddity 1: SW vs HW RuntimeShader</a></li>
+        <li><a href="#oddity-2">Oddity 2: ChromaWave Archeology</a></li>
+        <li><a href="#oddity-3">Oddity 3: Dual DSP Ingestion</a></li>
+        <li><a href="#oddity-4">Oddity 4: Synchronous Beat Bridge</a></li>
+        <li><a href="#oddity-5">Oddity 5: Zero-Recomp 60fps Loop</a></li>
+        <li><a href="#oddity-6">Oddity 6: Fused AGSL Uber-Shader</a></li>
+        <li><a href="#oddity-7">Oddity 7: Hand-Rolled org.json</a></li>
+        <li><a href="#oddity-8">Oddity 8: Real-DSP Synth Idle</a></li>
+        <li><a href="#oddity-9">Oddity 9: Accelerometer IIR Gate</a></li>
+        <li><a href="#oddity-10">Oddity 10: Monotonic Beat Clock</a></li>
+        <li><a href="#inventory">Module &amp; File Inventory</a></li>
+      </ul>
+    </aside>
+
+    <div>
+      <div class="badge-row">
+        <span class="pill-badge cyan">Engineering Post-Mortem</span>
+        <span class="pill-badge magenta">10 Unusual Code Paths Documented</span>
+      </div>
+      <h1 style="font-family:'Syne',sans-serif;font-weight:800;font-size:clamp(1.8rem,3vw,2.6rem);margin:0 0 12px;">
+        Blow-by-Blow Architecture &amp; Choice Reasonings
+      </h1>
+      <p style="color:var(--muted);margin:0 0 28px;max-width:70ch;">
+        Audio-visual Android apps sit on top of awkward hardware/OS boundaries: Skia software offscreen bitmaps refuse <code class="mono">RuntimeShader</code>s, Android's <code class="mono">Visualizer</code> API emits unsigned 8-bit bytes instead of PCM-16, and <code class="mono">StateFlow</code> drops transient beats under UI pressure. Below is every unusual path taken in SoundKandee—and why it exists.
+      </p>
+
+      <section id="pipeline" style="padding:0 0 32px;">
+        <h2 class="section-title" style="font-size:1.5rem;">End-to-End Signal &amp; Render Pipeline</h2>
+        <pre class="pipeline-box mono">
+Live Capture (Visualizer Session 0 / MediaProjection / AudioRecord)
+   └── OR ── SyntheticMusicGenerator (44.1kHz PCM-16 on silence, instant real-audio yield)
+        │
+        ▼
+ConfigurableDspProcessor
+  ├─ processPcm16()            (Hann / Hamming / Blackman / Rect window + Radix-2 1024-FFT)
+  └─ processVisualizerBytes()  (Unsigned 8-bit wave bias removal + signed FFT bin unpack)
+        │
+        ├──▶ [Sync Beat Onset Callback] ──▶ TempoSyncEngine (65–180 BPM octave folding + PLL + 3 LFO Buses)
+        │                                       │
+        ▼                                       ▼
+ModulationEvaluator (22 drivers -&gt; [scopeMin..scopeMax], 5 curves, attack/release, beat-grid hold)
+        │
+        ▼
+VisualizerCanvas (60fps withFrameNanos loop -&gt; zero UI tree recomposition)
+  ├─ Offscreen ImageBitmap Ping-Pong Echo Buffer (pure matrix/Skia Canvas, software-safe)
+  ├─ 12 LayerRenderers (checks nativeCanvas.isHardwareAccelerated before ShaderBrush)
+  └─ Outer Modifier.graphicsLayer RenderEffect (single fused AGSL MilkDrop/FX shader on API 33+)</pre>
+      </section>
+
+      <div id="oddity-1" class="oddity-card">
+        <div class="oddity-meta mono">VisualizerCanvas.kt • LayerRenderers.kt • drawNebulaFluid()</div>
+        <h3>Oddity 1 — Split-Pipeline Guard Against Skia's <code class="mono">RuntimeShader</code> Software Crash</h3>
+        <p style="color:var(--muted);">
+          <strong>The Trap:</strong> Jetpack Compose's offscreen <code class="mono">Canvas(ImageBitmap(...))</code> used for <em>Feedback Echo Trails</em> is always software-backed in Android's Canvas pipeline. Attempting to draw an AGSL <code class="mono">RuntimeShader</code> (<code class="mono">Nebula Plasma</code>) directly into that offscreen canvas throws <code class="mono">IllegalArgumentException: Software rendering doesn't support RuntimeShader</code>.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Why We Took This Path:</strong> Rather than banning <em>Feedback Echo Trails</em> whenever shaders are active, <code class="mono">LayerRenderers.drawNebulaFluid</code> checks <code class="mono">drawContext.canvas.nativeCanvas.isHardwareAccelerated</code> at draw time and swaps to multi-lobe radial gradient clouds when targeting software bitmaps or API 24–32 devices. Meanwhile, all 13+ spatial MilkDrop post-FX shaders execute outside the echo buffer inside the hardware-accelerated outer <code class="mono">Modifier.graphicsLayer { renderEffect = ... }</code> stage.
+        </p>
+      </div>
+
+      <div id="oddity-2" class="oddity-card">
+        <div class="oddity-meta mono">app/build.gradle.kts • PreferencesRepository.kt • ChromaWaveViewModel.kt</div>
+        <h3>Oddity 2 — Codename Archeology: <code class="mono">ChromaWave</code> Identifiers Inside <code class="mono">SoundKandee</code></h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Every user-facing string, launcher asset, and microsite surface says <strong>SoundKandee</strong>, yet internal Kotlin symbols (<code class="mono">ChromaWaveViewModel</code>, <code class="mono">ChromaWaveScreen</code>), <code class="mono">applicationId = "com.aistudio.chromawave.vzxqkm"</code>, <code class="mono">namespace = "com.example"</code>, and DataStore file <code class="mono">"chromawave_prefs"</code> retain the original codename.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Mutating <code class="mono">applicationId</code> or DataStore preference names after initial installation breaks Android package upgrade continuity and silently wipes saved user presets. Keeping internal symbols decoupled preserved every existing workspace while rebranding the public identity cleanly.
+        </p>
+      </div>
+
+      <div id="oddity-3" class="oddity-card">
+        <div class="oddity-meta mono">ConfigurableDspProcessor.kt • processPcm16() vs processVisualizerBytes()</div>
+        <h3>Oddity 3 — Two Asymmetrical Front-End Ingestion Math Paths in One DSP Engine</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Unlike single-format desktop audio engines, <code class="mono">ConfigurableDspProcessor</code> implements two separate ingestion pipelines converging on <code class="mono">buildAudioFrame()</code>.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> <code class="mono">AudioRecord</code> and Android 10+ <code class="mono">MediaProjection</code> capture emit standard signed 16-bit PCM (<code class="mono">ShortArray</code>) requiring user-selectable windowing and a Radix-2 Cooley-Tukey 1024-FFT. Android's Session-0 <code class="mono">Visualizer</code> API instead delivers unsigned 8-bit bytes biased around <code class="mono">128</code> and pre-computed interleaved <code class="mono">re/im</code> FFT bytes. Unifying both outputs into identical 64-band log arrays ensures presets never drift when switching audio inputs.
+        </p>
+      </div>
+
+      <div id="oddity-4" class="oddity-card">
+        <div class="oddity-meta mono">PlaybackCaptureBridge.kt • AudioCaptureCoordinator.kt</div>
+        <h3>Oddity 4 — Global Singleton Bridge + Synchronous Beat Forwarding vs. <code class="mono">StateFlow</code></h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Cross-component audio uses mutable callbacks on <code class="mono">PlaybackCaptureBridge</code> and invokes <code class="mono">tempoSyncEngine.onAutoBeatDetected(timestampMs)</code> synchronously inside <code class="mono">handleRealAudioFrame</code> rather than collecting <code class="mono">audioFrame</code> flow in the ViewModel.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> <code class="mono">StateFlow</code> is conflated by design—a brief UI frame stall causes newer quiet frames to overwrite a preceding <code class="mono">beatOnset = true</code> frame before collectors wake up, starving BPM estimation. Synchronous audio-thread delivery guarantees zero dropped beats with zero Binder IPC overhead inside the same process.
+        </p>
+      </div>
+
+      <div id="oddity-5" class="oddity-card">
+        <div class="oddity-meta mono">VisualizerCanvas.kt • ChromaWaveViewModel.kt • ExampleRobolectricTest.kt</div>
+        <h3>Oddity 5 — Zero-Recomposition 60fps Render Loop &amp; Manual Test Clocks</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Parameter evaluation runs inside a <code class="mono">withFrameNanos</code> loop updating Compose states read solely inside <code class="mono">Canvas { ... }</code>, while HUD <code class="mono">TempoSyncSnapshot</code> updates are throttled every 3rd frame (~20 Hz) and Compose tests set <code class="mono">mainClock.autoAdvance = false</code>.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Pushing 60Hz mutations into the top-level <code class="mono">VisualizerUiState</code> triggers full Dock slider/switch recompositions every 16ms. Isolating reads to <code class="mono">DrawScope</code> keeps the Compose tree idle while maintaining locked 60fps shader smoothness—requiring explicit clock stepping in Robolectric UI tests because continuous <code class="mono">withFrameNanos</code> prevents infinite-wait idling.
+        </p>
+      </div>
+
+      <div id="oddity-6" class="oddity-card">
+        <div class="oddity-meta mono">AgslShaders.kt • COMPOSITE_FX_SRC • FEEDBACK_WARP_SRC</div>
+        <h3>Oddity 6 — Fused Single-Pass AGSL Uber-Shader vs. Chained <code class="mono">RenderEffect</code>s</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> MilkDrop liquid warp, zoomexp tunnel pull, anamorphic stretch, pinwheel twist, wavefold, vortex, ripple, chromatic split, CRT scanlines, solarize, posterize, mirror-quad, and polar unwrap are compiled into one composite AGSL script.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Chaining 10+ separate <code class="mono">RenderEffect</code> passes saturates mobile GPU memory bandwidth. Combining coordinate transformations into a single UV warp followed by minimal multi-tap color operations allows multiple MilkDrop transformers to run simultaneously at 60fps.
+        </p>
+      </div>
+
+      <div id="oddity-7" class="oddity-card">
+        <div class="oddity-meta mono">PreferencesRepository.kt • app/build.gradle.kts</div>
+        <h3>Oddity 7 — Hand-Rolled <code class="mono">org.json</code> Persistence (Room, Moshi &amp; Firebase Commented Out)</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Despite commented-out Room/Moshi/Firebase blocks in Gradle, all preset serialization uses manual <code class="mono">JSONObject</code> / <code class="mono">JSONArray</code> marshalling inside Jetpack DataStore.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Cloud sync was intentionally omitted to preserve 100% offline privacy, and avoiding KSP/reflection serialization shrinks APK size and speeds up FOSS builds. Defensive <code class="mono">opt*</code> decoding also migrates older presets seamlessly when new LFO/Tempo fields appear.
+        </p>
+      </div>
+
+      <div id="oddity-8" class="oddity-card">
+        <div class="oddity-meta mono">SyntheticMusicGenerator.kt • AudioCaptureCoordinator.kt</div>
+        <h3>Oddity 8 — Synthetic Idle Music Feeding Real 1024-FFT DSP Instead of Mock Curves</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Idle synthesis generates real 44.1 kHz PCM-16 kick drums, sub-bass, pentatonic arps, and noise hi-hats and feeds them into an actual <code class="mono">ConfigurableDspProcessor</code> instance.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Fake UI arrays bypass windowing, noise-floor gates, spectral centroid pitch tracking, bandpass filter windows, and auto-beat PLL confidence. Synthesizing authentic PCM-16 makes idle mode behave identically to real playback and hands off cleanly the instant <code class="mono">lastRealSignalMs</code> detects live audio.
+        </p>
+      </div>
+
+      <div id="oddity-9" class="oddity-card">
+        <div class="oddity-meta mono">DeviceTapDetector.kt • processSample()</div>
+        <h3>Oddity 9 — Permissionless Tap Gesture with 4-Sample Gravity IIR Warmup</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> Falls back automatically from <code class="mono">TYPE_LINEAR_ACCELERATION</code> to raw <code class="mono">TYPE_ACCELEROMETER</code> with an <code class="mono">alpha = 0.8f</code> high-pass filter that suppresses the first 4 sensor events.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Without the 4-sample warmup gate, the uninitialized <code class="mono">9.81 m/s²</code> static Earth gravity vector looks like an instantaneous impulse shock on startup, falsely randomizing presets on first screen open.
+        </p>
+      </div>
+
+      <div id="oddity-10" class="oddity-card">
+        <div class="oddity-meta mono">ScopedParam.kt • TempoSyncEngine.kt</div>
+        <h3>Oddity 10 — Forward-Only Beat Snapping &amp; Inversion-Safe Range Bounds</h3>
+        <p style="color:var(--muted);">
+          <strong>The Quirk:</strong> <code class="mono">TempoSyncEngine.recordTap()</code> snaps beat phase forward to <code class="mono">floor(totalBeats) + 1.0</code>, auto-PLL only nudges forward, and <code class="mono">ScopedParam</code> exposes computed <code class="mono">orderedMin/orderedMax</code> properties.
+        </p>
+        <p style="color:var(--muted);margin-bottom:0;">
+          <strong>Reasoning:</strong> Backward beat jumps cause continuous visual oscillators and spirals to violently twitch backward during a live set. Computed <code class="mono">min/max</code> bounds let users drag dual-thumb sliders past each other without validation crashes.
+        </p>
+      </div>
+
+      <section id="inventory" style="padding:16px 0 0;">
+        <h2 class="section-title" style="font-size:1.5rem;">Complete Module Map</h2>
+        <div class="audit-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Package</th>
+                <th>Key Files</th>
+                <th>Core Responsibility</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="mono">com.example.audio</td>
+                <td class="mono">ConfigurableDspProcessor, AudioCaptureCoordinator, AppPlaybackCaptureService, PlaybackCaptureBridge, TempoSyncEngine, DeviceTapDetector, SyntheticMusicGenerator</td>
+                <td>Triple-source capture, FFT/spectral flux beat detection, auto/tap BPM PLL, 3 LFO clocks, accelerometer tap gesture, idle PCM-16 synthesis.</td>
+              </tr>
+              <tr>
+                <td class="mono">com.example.model</td>
+                <td class="mono">ScopedParam, TempoAndLfoModels, VisualizerModels, PresetCatalog</td>
+                <td>22 drivers, 5 curves, bandpass scopes, 12 styles, 17 transformers, 12 palettes, 8 presets, bounded mutation &amp; randomization.</td>
+              </tr>
+              <tr>
+                <td class="mono">com.example.render</td>
+                <td class="mono">VisualizerCanvas, LayerRenderers, AgslShaders, ColorEngine</td>
+                <td>Zero-recomp 60fps loop, offscreen echo buffer, ParticlePool, API 33+ AGSL MilkDrop shaders + API 24–32 fallbacks.</td>
+              </tr>
+              <tr>
+                <td class="mono">com.example.data</td>
+                <td class="mono">PreferencesRepository</td>
+                <td>Forward-compatible local <code class="mono">org.json</code> serialization in Jetpack DataStore.</td>
+              </tr>
+              <tr>
+                <td class="mono">com.example.ui</td>
+                <td class="mono">ChromaWaveViewModel, ChromaWaveScreen, StudioDock, LfoAndTempoTab, PresetsTab, ScopedParamControls, StudioTabs</td>
+                <td>StateFlow orchestration, responsive bottom-dock / side-rail adaptive UI, live LFO scopes, SoundKandee candy branding.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <div><strong>SoundKandee</strong> — Architecture &amp; Engineering Documentation</div>
+      <div class="nav-links">
+        <a href="index.html">Back to Product Microsite</a>
+        <a href="architecture.md">Markdown View</a>
+        <a href="../README.md">README</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

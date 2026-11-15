@@ -1,15 +1,13 @@
 package com.example.model
 
 import com.example.audio.AudioFrame
-import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 enum class ModulationDriver(val label: String, val shortLabel: String) {
     FIXED("Fixed", "FIX"),
@@ -24,7 +22,45 @@ enum class ModulationDriver(val label: String, val shortLabel: String) {
     FILTERED_BAND("Layer Hz Filter", "FILT"),
     LFO_SINE("Sine LFO", "SIN"),
     LFO_TRIANGLE("Triangle LFO", "TRI"),
+    LFO_SAW_UP("Sawtooth Up LFO", "SAW+"),
+    LFO_SAW_DOWN("Sawtooth Down LFO", "SAW-"),
+    LFO_SQUARE("Square Gate LFO", "SQR"),
+    LFO_SAMPLE_HOLD("S&H Random LFO", "S&H"),
     CHAOS_DRIFT("Chaos Drift", "CHAO"),
+    TEMPO_PULSE("BPM Beat Pulse", "BPM"),
+    TEMPO_SAW("BPM Beat Ramp", "RAMP"),
+    LFO_BUS_1("Master LFO 1", "LFO1"),
+    LFO_BUS_2("Master LFO 2", "LFO2"),
+    LFO_BUS_3("Master LFO 3", "LFO3");
+
+    val isLocalLfo: Boolean
+        get() = this == LFO_SINE ||
+            this == LFO_TRIANGLE ||
+            this == LFO_SAW_UP ||
+            this == LFO_SAW_DOWN ||
+            this == LFO_SQUARE ||
+            this == LFO_SAMPLE_HOLD ||
+            this == CHAOS_DRIFT
+
+    val isGlobalLfoBus: Boolean
+        get() = this == LFO_BUS_1 || this == LFO_BUS_2 || this == LFO_BUS_3
+
+    val isTempoDriver: Boolean
+        get() = this == TEMPO_PULSE || this == TEMPO_SAW
+
+    val isOscillator: Boolean
+        get() = isLocalLfo || isGlobalLfoBus || isTempoDriver
+
+    fun toLfoWaveformOrNull(): LfoWaveform? = when (this) {
+        LFO_SINE -> LfoWaveform.SINE
+        LFO_TRIANGLE -> LfoWaveform.TRIANGLE
+        LFO_SAW_UP -> LfoWaveform.SAW_UP
+        LFO_SAW_DOWN -> LfoWaveform.SAW_DOWN
+        LFO_SQUARE -> LfoWaveform.SQUARE
+        LFO_SAMPLE_HOLD -> LfoWaveform.SAMPLE_HOLD
+        CHAOS_DRIFT -> LfoWaveform.CHAOS
+        else -> null
+    }
 }
 
 enum class ResponseCurve(val label: String) {
@@ -53,6 +89,10 @@ data class ScopedParam(
     val attackMs: Float = 35f,
     val releaseMs: Float = 180f,
     val lfoHz: Float = 0.35f,
+    val lfoPhaseDeg: Float = 0f,
+    val lfoTempoSynced: Boolean = true,
+    val beatDivision: BeatDivision = BeatDivision.DIV_QUARTER,
+    val tempoQuantizeHold: Boolean = false,
     val inverted: Boolean = false,
     val locked: Boolean = false,
 ) {
@@ -81,13 +121,17 @@ data class AudioFilterScope(
 }
 
 /**
- * Stateful modulation matrix evaluating ScopedParams smoothly at 60fps.
+ * Stateful modulation matrix evaluating ScopedParams smoothly at 60fps,
+ * supporting audio bands, LFO waveforms (free or BPM-synced), Master LFO Buses 1..3,
+ * and beat-quantized parameter holding.
  */
 class ModulationEvaluator {
     private val smoothedNorms = HashMap<String, Float>(64)
+    private val quantizedHoldMap = HashMap<String, Pair<Long, Float>>(64)
 
     fun reset() {
         smoothedNorms.clear()
+        quantizedHoldMap.clear()
     }
 
     fun evaluateAudioSlice(frame: AudioFrame, filter: AudioFilterScope): Float {
@@ -125,7 +169,21 @@ class ModulationEvaluator {
         filterEnergy: Float,
         timeSec: Float,
         dtSec: Float,
+        tempo: TempoSyncSnapshot? = null,
+        forceTempoQuantize: Boolean = false,
     ): Float {
+        val phaseOffsetCycles = (param.lfoPhaseDeg / 360.0)
+        val useTempoClock = tempo != null && tempo.enabled && tempo.lockVisualOscillators && param.lfoTempoSynced
+
+        fun localLfoCycles(): Double {
+            val baseCycles = if (useTempoClock) {
+                tempo!!.totalBeats * param.beatDivision.cyclesPerBeat.toDouble()
+            } else {
+                timeSec.toDouble() * param.lfoHz.toDouble()
+            }
+            return baseCycles + phaseOffsetCycles
+        }
+
         val rawNorm = when (param.driver) {
             ModulationDriver.FIXED -> 0.5f
             ModulationDriver.SUB_BASS -> frame.subBass
@@ -137,19 +195,42 @@ class ModulationEvaluator {
             ModulationDriver.BEAT_PULSE -> frame.beatPulse
             ModulationDriver.SPECTRAL_CENTROID -> frame.spectralCentroid
             ModulationDriver.FILTERED_BAND -> filterEnergy
-            ModulationDriver.LFO_SINE -> {
-                (0.5f + 0.5f * sin(2.0 * PI * param.lfoHz * timeSec)).toFloat()
-            }
-            ModulationDriver.LFO_TRIANGLE -> {
-                val phase = (param.lfoHz * timeSec) % 1f
-                val p = if (phase < 0f) phase + 1f else phase
-                if (p < 0.5f) p * 2f else (1f - p) * 2f
-            }
+            ModulationDriver.LFO_SINE,
+            ModulationDriver.LFO_TRIANGLE,
+            ModulationDriver.LFO_SAW_UP,
+            ModulationDriver.LFO_SAW_DOWN,
+            ModulationDriver.LFO_SQUARE,
+            ModulationDriver.LFO_SAMPLE_HOLD,
             ModulationDriver.CHAOS_DRIFT -> {
-                val t = timeSec * param.lfoHz
-                val n = sin(t * 1.73f) * 0.5f + sin(t * 3.17f + 1.3f) * 0.3f + sin(t * 5.91f + 2.7f) * 0.2f
-                (n * 0.5f + 0.5f).coerceIn(0f, 1f)
+                val wf = param.driver.toLfoWaveformOrNull() ?: LfoWaveform.SINE
+                LfoMath.evaluateNormalized(
+                    waveform = wf,
+                    totalCycles = localLfoCycles(),
+                    dutyCycle = 0.5f,
+                    seedOffset = param.id.hashCode(),
+                )
             }
+            ModulationDriver.TEMPO_PULSE -> {
+                val cycles = if (tempo != null && tempo.enabled) {
+                    tempo.totalBeats * param.beatDivision.cyclesPerBeat.toDouble()
+                } else {
+                    timeSec.toDouble() * 2.0 * param.beatDivision.cyclesPerBeat.toDouble()
+                }
+                val frac = (((cycles + phaseOffsetCycles) % 1.0) + 1.0) % 1.0
+                (1f - frac.toFloat()).pow(2.2f)
+            }
+            ModulationDriver.TEMPO_SAW -> {
+                val cycles = if (tempo != null && tempo.enabled) {
+                    tempo.totalBeats * param.beatDivision.cyclesPerBeat.toDouble()
+                } else {
+                    timeSec.toDouble() * 2.0 * param.beatDivision.cyclesPerBeat.toDouble()
+                }
+                val frac = (((cycles + phaseOffsetCycles) % 1.0) + 1.0) % 1.0
+                frac.toFloat()
+            }
+            ModulationDriver.LFO_BUS_1 -> tempo?.lfoBusValues?.getOrElse(0) { 0.5f } ?: 0.5f
+            ModulationDriver.LFO_BUS_2 -> tempo?.lfoBusValues?.getOrElse(1) { 0.5f } ?: 0.5f
+            ModulationDriver.LFO_BUS_3 -> tempo?.lfoBusValues?.getOrElse(2) { 0.5f } ?: 0.5f
         }.coerceIn(0f, 1f)
 
         val curved = when (param.curve) {
@@ -161,11 +242,27 @@ class ModulationEvaluator {
         }
 
         val target = if (param.inverted) 1f - curved else curved
-        val prev = smoothedNorms[stateKey] ?: target
+
+        val shouldQuantize = (param.tempoQuantizeHold || forceTempoQuantize) &&
+            tempo != null &&
+            tempo.enabled &&
+            param.driver != ModulationDriver.FIXED
 
         val smoothed = if (param.driver == ModulationDriver.FIXED) {
             0.5f
+        } else if (shouldQuantize) {
+            val quantDiv = if (param.tempoQuantizeHold) param.beatDivision else tempo!!.transformerQuantizeDivision
+            val tickIdx = floor(tempo!!.totalBeats * quantDiv.cyclesPerBeat.toDouble()).toLong()
+            val held = quantizedHoldMap[stateKey]
+            val latchedValue = if (held == null || held.first != tickIdx) {
+                quantizedHoldMap[stateKey] = tickIdx to target
+                target
+            } else {
+                held.second
+            }
+            latchedValue.coerceIn(0f, 1f)
         } else {
+            val prev = smoothedNorms[stateKey] ?: target
             val tauMs = if (target >= prev) param.attackMs else param.releaseMs
             val tauSec = (tauMs / 1000f).coerceAtLeast(0.004f)
             val alpha = 1f - exp((-dtSec / tauSec).toDouble()).toFloat()

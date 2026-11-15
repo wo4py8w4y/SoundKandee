@@ -18,7 +18,10 @@ data class AudioFrame(
     val spectralCentroid: Float = 0f,
     val dominantHz: Float = 0f,
     val beatPulse: Float = 0f,
+    val beatOnset: Boolean = false,
+    val beatTimestampMs: Long = 0L,
     val isSignalActive: Boolean = false,
+    val isSyntheticFallback: Boolean = false,
     val timestampNs: Long = 0L,
 ) {
     override fun equals(other: Any?): Boolean {
