@@ -22,6 +22,7 @@ import com.example.model.LayerBlendMode
 import com.example.model.LfoChannelConfig
 import com.example.model.ModulationDriver
 import com.example.model.PresetCatalog
+import com.example.model.PresetTransitionConfig
 import com.example.model.TempoSyncConfig
 import com.example.model.TempoSyncMode
 import com.example.model.TempoSyncSnapshot
@@ -65,6 +66,8 @@ data class VisualizerUiState(
     val lfoBank: List<LfoChannelConfig> = PresetCatalog.presets.first().lfoBank,
     val deviceTapConfig: DeviceTapConfig = DeviceTapConfig(),
     val synthFallbackConfig: SynthFallbackConfig = SynthFallbackConfig(),
+    val presetTransitionConfig: PresetTransitionConfig = PresetTransitionConfig(),
+    val visualTransitionToken: Long = 0L,
     val lastDeviceTapEventMs: Long = 0L,
     val layers: List<VisualLayer> = PresetCatalog.presets.first().layers,
     val transformers: List<TransformerNode> = PresetCatalog.presets.first().transformers,
@@ -138,6 +141,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                     lfoBank = saved.lfoBank,
                     deviceTapConfig = saved.deviceTapConfig,
                     synthFallbackConfig = saved.synthFallbackConfig,
+                    presetTransitionConfig = saved.presetTransitionConfig,
                     layers = saved.layers,
                     transformers = saved.transformers,
                     colorEngine = saved.colorEngine,
@@ -146,6 +150,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                     userPresets = savedPresets,
                     activePresetId = resolvedPresetId,
                     hasUnsavedChanges = dirty,
+                    visualTransitionToken = current.visualTransitionToken + 1L,
                 )
             }
             _tempoSnapshot.value = tempoSyncEngine.currentSnapshot(_uiState.value.dspSettings.tempoSync)
@@ -171,6 +176,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                             lfoBank = state.lfoBank,
                             deviceTapConfig = state.deviceTapConfig,
                             synthFallbackConfig = state.synthFallbackConfig,
+                            presetTransitionConfig = state.presetTransitionConfig,
                             layers = state.layers,
                             transformers = state.transformers,
                             colorEngine = state.colorEngine,
@@ -665,6 +671,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                 expandedTransformerId = preset.transformers.firstOrNull()?.id,
                 activePresetId = preset.id,
                 hasUnsavedChanges = false,
+                visualTransitionToken = state.visualTransitionToken + 1L,
             )
         }
     }
@@ -729,6 +736,7 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
                 userPresets = updatedList,
                 activePresetId = copy.id,
                 hasUnsavedChanges = false,
+                visualTransitionToken = current.visualTransitionToken + 1L,
             )
         }
         viewModelScope.launch {
@@ -786,20 +794,41 @@ class ChromaWaveViewModel(application: Application) : AndroidViewModel(applicati
     fun mutate() {
         updateConfigState { state ->
             val (layers, txs, color) = PresetCatalog.mutate(state.layers, state.transformers, state.colorEngine)
-            state.copy(layers = layers, transformers = txs, colorEngine = color)
+            val bump = if (state.presetTransitionConfig.crossfadeOnRandomize) 1L else 0L
+            state.copy(
+                layers = layers,
+                transformers = txs,
+                colorEngine = color,
+                visualTransitionToken = state.visualTransitionToken + bump,
+            )
         }
     }
 
     fun randomize() {
         updateConfigState { state ->
             val (layers, txs, color) = PresetCatalog.randomize(state.layers, state.transformers, state.colorEngine)
+            val bump = if (state.presetTransitionConfig.crossfadeOnRandomize) 1L else 0L
             state.copy(
                 layers = layers,
                 transformers = txs,
                 colorEngine = color,
                 expandedLayerId = layers.firstOrNull()?.id,
                 expandedTransformerId = txs.firstOrNull()?.id,
+                visualTransitionToken = state.visualTransitionToken + bump,
             )
+        }
+    }
+
+    fun updatePresetTransitionConfig(transform: (PresetTransitionConfig) -> PresetTransitionConfig) {
+        _uiState.update { state ->
+            val raw = transform(state.presetTransitionConfig)
+            val clamped = raw.copy(
+                durationMs = raw.durationMs.coerceIn(
+                    PresetTransitionConfig.MIN_DURATION_MS,
+                    PresetTransitionConfig.MAX_DURATION_MS,
+                )
+            )
+            state.copy(presetTransitionConfig = clamped)
         }
     }
 

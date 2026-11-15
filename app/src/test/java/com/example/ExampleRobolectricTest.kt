@@ -19,9 +19,11 @@ import com.example.model.FftWindowType
 import com.example.model.LayerBlendMode
 import com.example.model.LfoWaveform
 import com.example.model.ModulationDriver
+import com.example.model.PresetTransitionConfig
 import com.example.model.ResponseCurve
 import com.example.model.TempoSyncMode
 import com.example.model.TransformerType
+import com.example.model.TransitionCurve
 import com.example.model.VisualStyleType
 import com.example.ui.ChromaWaveViewModel
 import com.example.ui.QuickLfoTarget
@@ -263,6 +265,46 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("prev_preset_btn").performClick()
         composeRule.mainClock.advanceTimeBy(100)
         composeRule.onAllNodesWithText("Laser Storm").onFirst().assertIsDisplayed()
+
+        // Expand crossfade settings inside Presets tab and select Equal Power curve variation
+        composeRule.onNodeWithTag("presets_crossfade_header").performClick()
+        composeRule.mainClock.advanceTimeBy(100)
+        composeRule.onNodeWithTag("presets_curve_${TransitionCurve.EQUAL_POWER.name}").assertIsDisplayed().performClick()
+        composeRule.mainClock.advanceTimeBy(80)
+        composeRule.onAllNodesWithText("Eq Power • 750ms • FX Morph").onFirst().assertIsDisplayed()
+    }
+
+    @Test
+    fun viewmodel_preset_crossfade_tokens_and_settings_variations_work_without_dirtying_preset() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = ChromaWaveViewModel(app)
+
+        val tokenBefore = vm.uiState.value.visualTransitionToken
+        vm.updatePresetTransitionConfig {
+            PresetTransitionConfig(
+                enabled = true,
+                durationMs = 1200,
+                curve = TransitionCurve.BEAT_PUNCH,
+                morphShadersAndPalettes = false,
+                crossfadeOnRandomize = false,
+            )
+        }
+        assertFalse("Updating global transition settings must not mark preset dirty", vm.uiState.value.hasUnsavedChanges)
+        assertEquals(1200, vm.uiState.value.presetTransitionConfig.durationMs)
+        assertEquals(TransitionCurve.BEAT_PUNCH, vm.uiState.value.presetTransitionConfig.curve)
+
+        // Randomize respects crossfadeOnRandomize = false (does not trigger visual crossfade)
+        vm.randomize()
+        assertEquals(tokenBefore, vm.uiState.value.visualTransitionToken)
+
+        // Preset switches always bump visualTransitionToken
+        vm.switchToNextPreset()
+        assertEquals(tokenBefore + 1L, vm.uiState.value.visualTransitionToken)
+
+        // Turning crossfadeOnRandomize = true triggers smooth blend on randomize
+        vm.updatePresetTransitionConfig { it.copy(crossfadeOnRandomize = true) }
+        vm.randomize()
+        assertEquals(tokenBefore + 2L, vm.uiState.value.visualTransitionToken)
     }
 }
 

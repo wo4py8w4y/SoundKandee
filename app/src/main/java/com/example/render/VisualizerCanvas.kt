@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
@@ -43,17 +44,32 @@ import com.example.audio.TempoSyncEngine
 import com.example.model.ColorEngineConfig
 import com.example.model.LfoChannelConfig
 import com.example.model.ModulationEvaluator
+import com.example.model.PresetTransitionBlender
+import com.example.model.PresetTransitionConfig
 import com.example.model.TempoSyncConfig
 import com.example.model.TempoSyncSnapshot
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
+import com.example.model.TransitionCurve
 import com.example.model.VisualLayer
+import com.example.model.VisualStyleType
 import com.example.ui.theme.VoidObsidian
-import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
+
+private data class EvaluatedRenderLayer(
+    val layer: VisualLayer,
+    val params: EvaluatedLayerParams,
+    val palette: List<Color>,
+)
+
+private data class OutgoingLayerEntry(
+    val layer: VisualLayer,
+    val colorEngine: ColorEngineConfig,
+    val baseWeight: Float,
+)
 
 /**
  * Live 60fps composited visualizer canvas supporting:
@@ -61,6 +77,7 @@ import kotlin.random.Random
  * - Offscreen ping-pong echo buffer for Feedback Echo Trails
  * - Overlapping spatial & wave transformers (Kaleidoscope, Tile Mosaic, Vortex, WaveFold, Chromatic Split, Ripples, Bloom, CRT)
  * - Tempo-synced visual oscillator clock & 3 Master LFO buses
+ * - Smooth cross-fading preset transitions across layers, palettes, spatial mirrors & shader uniforms
  * - Tactile pinch/pan focal point steering & tap-to-Zen toggle
  */
 @Composable
@@ -71,6 +88,8 @@ fun VisualizerCanvas(
     tempoSyncConfig: TempoSyncConfig,
     lfoBank: List<LfoChannelConfig>,
     tempoSyncEngine: TempoSyncEngine,
+    presetTransitionConfig: PresetTransitionConfig,
+    visualTransitionToken: Long,
     audioFrameProvider: () -> AudioFrame,
     onLiveEvaluatedValues: (Map<String, Float>) -> Unit,
     onTempoSnapshot: (TempoSyncSnapshot) -> Unit,
@@ -86,6 +105,14 @@ fun VisualizerCanvas(
             null
         }
     }
+
+    val currentLayers by rememberUpdatedState(layers)
+    val currentTransformers by rememberUpdatedState(transformers)
+    val currentColorEngine by rememberUpdatedState(colorEngine)
+    val currentTempoSync by rememberUpdatedState(tempoSyncConfig)
+    val currentLfoBank by rememberUpdatedState(lfoBank)
+    val currentTransitionConfig by rememberUpdatedState(presetTransitionConfig)
+    val currentTransitionToken by rememberUpdatedState(visualTransitionToken)
 
     var frameTick by remember { mutableLongStateOf(0L) }
     var elapsedSec by remember { mutableFloatStateOf(0f) }
@@ -105,22 +132,184 @@ fun VisualizerCanvas(
 
     // Snapshot holders updated every frame for zero-recomposition DrawScope reads
     var currentFrame by remember { mutableStateOf(AudioFrame()) }
-    var evaluatedLayerList by remember { mutableStateOf<List<Pair<VisualLayer, EvaluatedLayerParams>>>(emptyList()) }
+    var outgoingRenderLayers by remember { mutableStateOf<List<EvaluatedRenderLayer>>(emptyList()) }
+    var incomingRenderLayers by remember { mutableStateOf<List<EvaluatedRenderLayer>>(emptyList()) }
     var evaluatedPalette by remember { mutableStateOf<List<Color>>(emptyList()) }
     var activeTxValues by remember { mutableStateOf<Map<TransformerType, Triple<Float, Float, Float>>>(emptyMap()) }
-    var lastDtSec by remember { mutableFloatStateOf(0.016f) }
+    var outgoingSpatialTx by remember { mutableStateOf<Map<TransformerType, Triple<Float, Float, Float>>>(emptyMap()) }
+    var incomingSpatialTx by remember { mutableStateOf<Map<TransformerType, Triple<Float, Float, Float>>>(emptyMap()) }
+    var splitSpatialPass by remember { mutableStateOf(false) }
 
-    LaunchedEffect(layers, transformers, colorEngine, tempoSyncConfig, lfoBank) {
+    LaunchedEffect(Unit) {
         var prevNanos = 0L
         var uiTempoThrottle = 0
+
+        // Cross-fade transition state maintained across live updates without restarting frame clock
+        var isTransitioning = false
+        var transitionElapsedSec = 0f
+        var transitionDurationSec = 0.75f
+        var activeTransitionCurve = TransitionCurve.SMOOTHSTEP
+        var activeMorphShadersAndPalettes = true
+        var outgoingEntries: List<OutgoingLayerEntry> = emptyList()
+        var outgoingPaletteSnapshot: List<Color> = emptyList()
+        var outgoingTxSnapshot: Map<TransformerType, Triple<Float, Float, Float>> = emptyMap()
+        var lastCommittedLayers: List<VisualLayer> = emptyList()
+        var lastCommittedColorEngine: ColorEngineConfig? = null
+        var lastCommittedToken = currentTransitionToken
+        var lastOutgoingGain = 0f
+        var lastIncomingGain = 1f
+
+        fun evaluatePalette(
+            ce: ColorEngineConfig,
+            audio: AudioFrame,
+            dt: Float,
+            tempoSnap: TempoSyncSnapshot,
+            driftRate: Float,
+            advanceHue: Boolean,
+            telemetryTarget: MutableMap<String, Float>?,
+        ): List<Color> {
+            val hueBase = evaluator.evaluate("c_hue", ce.hueShift, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+            val hueDrift = evaluator.evaluate("c_drift", ce.hueDriftSpeed, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+            val sat = evaluator.evaluate("c_sat", ce.saturation, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+            val luma = evaluator.evaluate("c_luma", ce.contrast, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
+            val flash = evaluator.evaluate("c_flash", ce.beatFlash, audio, audio.beatPulse, elapsedSec, dt, tempoSnap)
+            if (advanceHue) {
+                accumulatedHueDeg = (accumulatedHueDeg + hueDrift * dt * driftRate) % 360f
+            }
+            if (telemetryTarget != null) {
+                telemetryTarget[ce.hueShift.id] = hueBase
+                telemetryTarget[ce.hueDriftSpeed.id] = hueDrift
+                telemetryTarget[ce.saturation.id] = sat
+                telemetryTarget[ce.contrast.id] = luma
+                telemetryTarget[ce.beatFlash.id] = flash
+            }
+            val basePalette = ColorEngine.activeBaseColors(ce)
+            return ColorEngine.transformPalette(
+                colors = basePalette,
+                hueShiftDeg = hueBase + accumulatedHueDeg,
+                saturationMul = sat,
+                lumaBoost = luma,
+                beatFlash = flash,
+            )
+        }
+
+        fun evaluateSingleLayer(
+            keyPrefix: String,
+            layer: VisualLayer,
+            palette: List<Color>,
+            opacityGain: Float,
+            audio: AudioFrame,
+            dt: Float,
+            tempoSnap: TempoSyncSnapshot,
+            driftRate: Float,
+            telemetryTarget: MutableMap<String, Float>?,
+        ): EvaluatedRenderLayer {
+            val slice = evaluator.evaluateAudioSlice(audio, layer.audioFilter)
+            val op = evaluator.evaluate("${keyPrefix}_op", layer.opacity, audio, slice, elapsedSec, dt, tempoSnap)
+            val sc = evaluator.evaluate("${keyPrefix}_sc", layer.scale, audio, slice, elapsedSec, dt, tempoSnap)
+            val rotSpeed = evaluator.evaluate("${keyPrefix}_rot", layer.rotationSpeed, audio, slice, elapsedSec, dt, tempoSnap)
+            val ox = evaluator.evaluate("${keyPrefix}_ox", layer.offsetX, audio, slice, elapsedSec, dt, tempoSnap)
+            val oy = evaluator.evaluate("${keyPrefix}_oy", layer.offsetY, audio, slice, elapsedSec, dt, tempoSnap)
+            val p1 = evaluator.evaluate("${keyPrefix}_p1", layer.primaryParam, audio, slice, elapsedSec, dt, tempoSnap)
+            val p2 = evaluator.evaluate("${keyPrefix}_p2", layer.secondaryParam, audio, slice, elapsedSec, dt, tempoSnap)
+            val p3 = evaluator.evaluate("${keyPrefix}_p3", layer.tertiaryParam, audio, slice, elapsedSec, dt, tempoSnap)
+
+            val prevAngle = layerRotations[layer.id] ?: 0f
+            val nextAngle = (prevAngle + rotSpeed * dt * driftRate) % 360f
+            layerRotations[layer.id] = nextAngle
+
+            if (telemetryTarget != null) {
+                telemetryTarget[layer.opacity.id] = op
+                telemetryTarget[layer.scale.id] = sc
+                telemetryTarget[layer.rotationSpeed.id] = rotSpeed
+                telemetryTarget[layer.offsetX.id] = ox
+                telemetryTarget[layer.offsetY.id] = oy
+                telemetryTarget[layer.primaryParam.id] = p1
+                telemetryTarget[layer.secondaryParam.id] = p2
+                telemetryTarget[layer.tertiaryParam.id] = p3
+            }
+
+            if (layer.styleType == VisualStyleType.PARTICLE_STARBURST && opacityGain > 0.05f) {
+                particlePool.step(dt * driftRate, p2, p3, audio.beatPulse, slice)
+            }
+
+            return EvaluatedRenderLayer(
+                layer = layer,
+                params = EvaluatedLayerParams(
+                    opacity = (op * opacityGain).coerceIn(0f, 1f),
+                    scale = sc,
+                    rotationDeg = nextAngle,
+                    offsetXNorm = ox,
+                    offsetYNorm = oy,
+                    primary = p1,
+                    secondary = p2,
+                    tertiary = p3,
+                    sliceEnergy = slice,
+                ),
+                palette = palette,
+            )
+        }
+
         while (true) {
             withFrameNanos { nanos ->
                 val dt = if (prevNanos == 0L) 0.016f else ((nanos - prevNanos) / 1_000_000_000f).coerceIn(0.001f, 0.05f)
                 prevNanos = nanos
-                lastDtSec = dt
                 elapsedSec += dt
 
-                val tempoSnap = tempoSyncEngine.step(dt, tempoSyncConfig, lfoBank)
+                val latestLayers = currentLayers
+                val latestTransformers = currentTransformers
+                val latestColorEngine = currentColorEngine
+                val latestTempoSync = currentTempoSync
+                val latestLfoBank = currentLfoBank
+                val latestTransitionConfig = currentTransitionConfig
+                val latestToken = currentTransitionToken
+
+                // Detect a preset/configuration switch trigger without touching live slider edits
+                if (latestToken != lastCommittedToken) {
+                    lastCommittedToken = latestToken
+                    val prevCe = lastCommittedColorEngine
+                    if (latestTransitionConfig.enabled &&
+                        latestTransitionConfig.durationMs > 0 &&
+                        prevCe != null &&
+                        lastCommittedLayers.isNotEmpty()
+                    ) {
+                        outgoingEntries = if (isTransitioning) {
+                            val carriedOld = outgoingEntries.map {
+                                it.copy(baseWeight = it.baseWeight * lastOutgoingGain)
+                            }
+                            val anyPrevSolo = lastCommittedLayers.any { it.solo && it.enabled }
+                            val carriedIncoming = lastCommittedLayers
+                                .filter { it.enabled && (!anyPrevSolo || it.solo) }
+                                .map { OutgoingLayerEntry(it, prevCe, lastIncomingGain) }
+                            (carriedOld + carriedIncoming)
+                                .filter { it.baseWeight >= 0.02f }
+                                .takeLast(10)
+                        } else {
+                            val anyPrevSolo = lastCommittedLayers.any { it.solo && it.enabled }
+                            lastCommittedLayers
+                                .filter { it.enabled && (!anyPrevSolo || it.solo) }
+                                .map { OutgoingLayerEntry(it, prevCe, 1f) }
+                        }
+                        outgoingPaletteSnapshot = evaluatedPalette
+                        outgoingTxSnapshot = activeTxValues
+                        transitionElapsedSec = 0f
+                        transitionDurationSec = latestTransitionConfig.durationMs / 1000f
+                        activeTransitionCurve = latestTransitionConfig.curve
+                        activeMorphShadersAndPalettes = latestTransitionConfig.morphShadersAndPalettes
+                        isTransitioning = outgoingEntries.isNotEmpty() || outgoingTxSnapshot.isNotEmpty()
+                        lastOutgoingGain = 1f
+                        lastIncomingGain = 0f
+                    } else {
+                        isTransitioning = false
+                        outgoingEntries = emptyList()
+                        lastOutgoingGain = 0f
+                        lastIncomingGain = 1f
+                    }
+                }
+                lastCommittedLayers = latestLayers
+                lastCommittedColorEngine = latestColorEngine
+
+                val tempoSnap = tempoSyncEngine.step(dt, latestTempoSync, latestLfoBank)
                 val visualClock = if (tempoSnap.lockVisualOscillators) tempoSnap.oscillatorTimeSec else elapsedSec
                 oscTimeSec = visualClock
                 uiTempoThrottle++
@@ -133,79 +322,108 @@ fun VisualizerCanvas(
                 currentFrame = audio
 
                 val liveTelemetryMap = HashMap<String, Float>(48)
-
-                // Evaluate color engine
-                val hueBase = evaluator.evaluate("c_hue", colorEngine.hueShift, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
-                val hueDrift = evaluator.evaluate("c_drift", colorEngine.hueDriftSpeed, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
-                val sat = evaluator.evaluate("c_sat", colorEngine.saturation, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
-                val luma = evaluator.evaluate("c_luma", colorEngine.contrast, audio, audio.overallRms, elapsedSec, dt, tempoSnap)
-                val flash = evaluator.evaluate("c_flash", colorEngine.beatFlash, audio, audio.beatPulse, elapsedSec, dt, tempoSnap)
                 val driftRate = if (tempoSnap.lockVisualOscillators) (tempoSnap.effectiveBpm / 120f) else 1f
-                accumulatedHueDeg = (accumulatedHueDeg + hueDrift * dt * driftRate) % 360f
 
-                liveTelemetryMap[colorEngine.hueShift.id] = hueBase
-                liveTelemetryMap[colorEngine.hueDriftSpeed.id] = hueDrift
-                liveTelemetryMap[colorEngine.saturation.id] = sat
-                liveTelemetryMap[colorEngine.contrast.id] = luma
-                liveTelemetryMap[colorEngine.beatFlash.id] = flash
+                // Advance cross-fade envelope
+                var outGain = 0f
+                var inGain = 1f
+                var morphT = 1f
+                if (isTransitioning) {
+                    transitionElapsedSec += dt
+                    val rawProgress = (transitionElapsedSec / transitionDurationSec.coerceAtLeast(0.001f)).coerceIn(0f, 1f)
+                    if (rawProgress >= 1f) {
+                        isTransitioning = false
+                        outgoingEntries = emptyList()
+                    } else {
+                        val gains = PresetTransitionBlender.evaluateGains(rawProgress, activeTransitionCurve)
+                        outGain = gains.outgoingGain
+                        inGain = gains.incomingGain
+                        morphT = gains.morphT
+                    }
+                    lastOutgoingGain = outGain
+                    lastIncomingGain = inGain
+                }
 
-                val basePalette = ColorEngine.activeBaseColors(colorEngine)
-                evaluatedPalette = ColorEngine.transformPalette(
-                    colors = basePalette,
-                    hueShiftDeg = hueBase + accumulatedHueDeg,
-                    saturationMul = sat,
-                    lumaBoost = luma,
-                    beatFlash = flash,
+                // Evaluate incoming color palette
+                val targetPalette = evaluatePalette(
+                    ce = latestColorEngine,
+                    audio = audio,
+                    dt = dt,
+                    tempoSnap = tempoSnap,
+                    driftRate = driftRate,
+                    advanceHue = true,
+                    telemetryTarget = liveTelemetryMap,
                 )
 
-                // Evaluate layers (respect solo if any layer is soloed)
-                val anySolo = layers.any { it.solo && it.enabled }
-                val activeLayers = layers.filter { it.enabled && (!anySolo || it.solo) }
-                evaluatedLayerList = activeLayers.map { layer ->
-                    val slice = evaluator.evaluateAudioSlice(audio, layer.audioFilter)
-                    val op = evaluator.evaluate("${layer.id}_op", layer.opacity, audio, slice, elapsedSec, dt, tempoSnap)
-                    val sc = evaluator.evaluate("${layer.id}_sc", layer.scale, audio, slice, elapsedSec, dt, tempoSnap)
-                    val rotSpeed = evaluator.evaluate("${layer.id}_rot", layer.rotationSpeed, audio, slice, elapsedSec, dt, tempoSnap)
-                    val ox = evaluator.evaluate("${layer.id}_ox", layer.offsetX, audio, slice, elapsedSec, dt, tempoSnap)
-                    val oy = evaluator.evaluate("${layer.id}_oy", layer.offsetY, audio, slice, elapsedSec, dt, tempoSnap)
-                    val p1 = evaluator.evaluate("${layer.id}_p1", layer.primaryParam, audio, slice, elapsedSec, dt, tempoSnap)
-                    val p2 = evaluator.evaluate("${layer.id}_p2", layer.secondaryParam, audio, slice, elapsedSec, dt, tempoSnap)
-                    val p3 = evaluator.evaluate("${layer.id}_p3", layer.tertiaryParam, audio, slice, elapsedSec, dt, tempoSnap)
-
-                    val prevAngle = layerRotations[layer.id] ?: 0f
-                    val nextAngle = (prevAngle + rotSpeed * dt * driftRate) % 360f
-                    layerRotations[layer.id] = nextAngle
-
-                    liveTelemetryMap[layer.opacity.id] = op
-                    liveTelemetryMap[layer.scale.id] = sc
-                    liveTelemetryMap[layer.rotationSpeed.id] = rotSpeed
-                    liveTelemetryMap[layer.offsetX.id] = ox
-                    liveTelemetryMap[layer.offsetY.id] = oy
-                    liveTelemetryMap[layer.primaryParam.id] = p1
-                    liveTelemetryMap[layer.secondaryParam.id] = p2
-                    liveTelemetryMap[layer.tertiaryParam.id] = p3
-
-                    if (layer.styleType == com.example.model.VisualStyleType.PARTICLE_STARBURST) {
-                        particlePool.step(dt * driftRate, p2, p3, audio.beatPulse, slice)
+                val resolvedGlobalPalette = if (isTransitioning) {
+                    if (activeMorphShadersAndPalettes) {
+                        PresetTransitionBlender.lerpPalettes(outgoingPaletteSnapshot, targetPalette, morphT)
+                    } else {
+                        if (morphT < 0.5f) outgoingPaletteSnapshot.ifEmpty { targetPalette } else targetPalette
                     }
+                } else {
+                    targetPalette
+                }
+                evaluatedPalette = resolvedGlobalPalette
 
-                    layer to EvaluatedLayerParams(
-                        opacity = op,
-                        scale = sc,
-                        rotationDeg = nextAngle,
-                        offsetXNorm = ox,
-                        offsetYNorm = oy,
-                        primary = p1,
-                        secondary = p2,
-                        tertiary = p3,
-                        sliceEnergy = slice,
+                // Evaluate outgoing fading layers (keeping each outgoing layer alive with audio + its own palette)
+                val evaluatedOutgoing = if (isTransitioning && outGain > 0.005f && outgoingEntries.isNotEmpty()) {
+                    val outgoingPalCache = HashMap<ColorEngineConfig, List<Color>>()
+                    outgoingEntries.mapNotNull { entry ->
+                        val weight = outGain * entry.baseWeight
+                        if (weight <= 0.005f) return@mapNotNull null
+                        val entryPalette = outgoingPalCache.getOrPut(entry.colorEngine) {
+                            if (entry.colorEngine == latestColorEngine) {
+                                targetPalette
+                            } else {
+                                evaluatePalette(
+                                    ce = entry.colorEngine,
+                                    audio = audio,
+                                    dt = dt,
+                                    tempoSnap = tempoSnap,
+                                    driftRate = driftRate,
+                                    advanceHue = false,
+                                    telemetryTarget = null,
+                                )
+                            }
+                        }
+                        evaluateSingleLayer(
+                            keyPrefix = "out_${entry.layer.id}",
+                            layer = entry.layer,
+                            palette = entryPalette,
+                            opacityGain = weight,
+                            audio = audio,
+                            dt = dt,
+                            tempoSnap = tempoSnap,
+                            driftRate = driftRate,
+                            telemetryTarget = null,
+                        )
+                    }
+                } else {
+                    emptyList()
+                }
+
+                // Evaluate incoming active layers (always populate telemetry so HUD reflects target scopes)
+                val anySolo = latestLayers.any { it.solo && it.enabled }
+                val activeLayers = latestLayers.filter { it.enabled && (!anySolo || it.solo) }
+                val evaluatedIncoming = activeLayers.map { layer ->
+                    evaluateSingleLayer(
+                        keyPrefix = layer.id,
+                        layer = layer,
+                        palette = targetPalette,
+                        opacityGain = inGain,
+                        audio = audio,
+                        dt = dt,
+                        tempoSnap = tempoSnap,
+                        driftRate = driftRate,
+                        telemetryTarget = liveTelemetryMap,
                     )
                 }
 
-                // Evaluate transformers (respecting beat quantization if enabled)
+                // Evaluate incoming transformers (respecting beat quantization if enabled)
                 val quantizeTx = tempoSnap.quantizeTransformerChanges
-                val txMap = HashMap<TransformerType, Triple<Float, Float, Float>>()
-                transformers.filter { it.enabled }.forEach { node ->
+                val targetTxMap = HashMap<TransformerType, Triple<Float, Float, Float>>()
+                latestTransformers.filter { it.enabled }.forEach { node ->
                     val slice = evaluator.evaluateAudioSlice(audio, node.audioFilter)
                     val amt = evaluator.evaluate("${node.id}_amt", node.amount, audio, slice, elapsedSec, dt, tempoSnap, quantizeTx)
                     val freq = evaluator.evaluate("${node.id}_freq", node.frequency, audio, slice, elapsedSec, dt, tempoSnap, quantizeTx)
@@ -215,9 +433,31 @@ fun VisualizerCanvas(
                     liveTelemetryMap[node.frequency.id] = freq
                     liveTelemetryMap[node.phaseOrDrift.id] = drift
 
-                    txMap[node.type] = Triple(amt, freq, drift)
+                    targetTxMap[node.type] = Triple(amt, freq, drift)
                 }
-                activeTxValues = txMap
+
+                val blendedTxMap = if (isTransitioning) {
+                    if (activeMorphShadersAndPalettes) {
+                        PresetTransitionBlender.interpolateTxMaps(outgoingTxSnapshot, targetTxMap, morphT)
+                    } else {
+                        if (morphT < 0.5f) outgoingTxSnapshot else targetTxMap
+                    }
+                } else {
+                    targetTxMap
+                }
+
+                val needsSplitSpatial = isTransitioning && (
+                    !activeMorphShadersAndPalettes ||
+                        PresetTransitionBlender.hasDifferentSpatialSymmetry(outgoingTxSnapshot, targetTxMap)
+                    )
+
+                outgoingRenderLayers = evaluatedOutgoing
+                incomingRenderLayers = evaluatedIncoming
+                outgoingSpatialTx = outgoingTxSnapshot
+                incomingSpatialTx = targetTxMap
+                splitSpatialPass = needsSplitSpatial
+                activeTxValues = blendedTxMap
+
                 onLiveEvaluatedValues(liveTelemetryMap)
                 frameTick = nanos
             }
@@ -332,31 +572,39 @@ fun VisualizerCanvas(
             val hPx = size.height.roundToInt().coerceAtLeast(1)
             val echoConfig = activeTxValues[TransformerType.FEEDBACK_ECHO]?.takeIf { it.first > 0.02f }
 
-            // Helper lambda to draw all overlapping generator layers with spatial transforms
-            fun DrawScope.drawSceneContent(targetSize: Size) {
-                val kaleido = activeTxValues[TransformerType.KALEIDOSCOPE_MIRROR]
-                val tile = activeTxValues[TransformerType.KALEIDO_TILE_MOSAIC]
-
-                fun DrawScope.renderGenerators() {
-                    translate(left = userPanOffset.x, top = userPanOffset.y) {
-                        scale(scale = userZoom, pivot = Offset(targetSize.width * 0.5f, targetSize.height * 0.5f)) {
-                            evaluatedLayerList.forEach { (layer, params) ->
-                                with(LayerRenderers) {
-                                    renderLayer(
-                                        styleType = layer.styleType,
-                                        blendMode = layer.blendMode.composeBlendMode,
-                                        params = params,
-                                        frame = currentFrame,
-                                        palette = evaluatedPalette,
-                                        timeSec = oscTimeSec,
-                                        particlePool = particlePool,
-                                        agslHolder = agslHolder,
-                                    )
-                                }
+            fun DrawScope.renderLayerList(
+                items: List<EvaluatedRenderLayer>,
+                targetSize: Size,
+            ) {
+                if (items.isEmpty()) return
+                translate(left = userPanOffset.x, top = userPanOffset.y) {
+                    scale(scale = userZoom, pivot = Offset(targetSize.width * 0.5f, targetSize.height * 0.5f)) {
+                        items.forEach { item ->
+                            with(LayerRenderers) {
+                                renderLayer(
+                                    styleType = item.layer.styleType,
+                                    blendMode = item.layer.blendMode.composeBlendMode,
+                                    params = item.params,
+                                    frame = currentFrame,
+                                    palette = item.palette,
+                                    timeSec = oscTimeSec,
+                                    particlePool = particlePool,
+                                    agslHolder = agslHolder,
+                                )
                             }
                         }
                     }
                 }
+            }
+
+            fun DrawScope.drawSpatialLayers(
+                items: List<EvaluatedRenderLayer>,
+                spatialTx: Map<TransformerType, Triple<Float, Float, Float>>,
+                targetSize: Size,
+            ) {
+                if (items.isEmpty()) return
+                val kaleido = spatialTx[TransformerType.KALEIDOSCOPE_MIRROR]
+                val tile = spatialTx[TransformerType.KALEIDO_TILE_MOSAIC]
 
                 if (kaleido != null && kaleido.first >= 2f) {
                     val folds = kaleido.first.roundToInt().coerceIn(2, 24)
@@ -374,7 +622,7 @@ fun VisualizerCanvas(
                                 pivot = Offset(cx, cy),
                             ) {
                                 clipRect(left = cx, top = 0f, right = targetSize.width, bottom = targetSize.height) {
-                                    renderGenerators()
+                                    renderLayerList(items, targetSize)
                                 }
                             }
                         }
@@ -396,14 +644,28 @@ fun VisualizerCanvas(
                                     val sx = (1f / grid) * if (flipOdd && gx % 2 == 1) -1f else 1f
                                     val sy = (1f / grid) * if (flipOdd && gy % 2 == 1) -1f else 1f
                                     scale(scaleX = sx, scaleY = sy, pivot = Offset(targetSize.width * 0.5f, targetSize.height * 0.5f)) {
-                                        renderGenerators()
+                                        renderLayerList(items, targetSize)
                                     }
                                 }
                             }
                         }
                     }
                 } else {
-                    renderGenerators()
+                    renderLayerList(items, targetSize)
+                }
+            }
+
+            fun DrawScope.drawSceneContent(targetSize: Size) {
+                if (splitSpatialPass) {
+                    drawSpatialLayers(outgoingRenderLayers, outgoingSpatialTx, targetSize)
+                    drawSpatialLayers(incomingRenderLayers, incomingSpatialTx, targetSize)
+                } else {
+                    val combined = if (outgoingRenderLayers.isEmpty()) {
+                        incomingRenderLayers
+                    } else {
+                        outgoingRenderLayers + incomingRenderLayers
+                    }
+                    drawSpatialLayers(combined, activeTxValues, targetSize)
                 }
             }
 
@@ -460,6 +722,10 @@ fun VisualizerCanvas(
                     dstSize = IntSize(wPx, hPx),
                 )
             } else {
+                if (echoFront != null) {
+                    echoFront = null
+                    echoBack = null
+                }
                 drawRect(VoidObsidian)
                 drawSceneContent(size)
             }

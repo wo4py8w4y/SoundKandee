@@ -70,6 +70,7 @@ import com.example.model.FftWindowType
 import com.example.model.LayerBlendMode
 import com.example.model.ModulationEvaluator
 import com.example.model.PresetCatalog
+import com.example.model.PresetTransitionConfig
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
 import com.example.model.VisualLayer
@@ -739,12 +740,14 @@ fun AudioDspTabContent(
     dspSettings: DspSettings,
     synthFallbackConfig: SynthFallbackConfig,
     deviceTapConfig: DeviceTapConfig,
+    presetTransitionConfig: PresetTransitionConfig,
     hasTapHardwareSensor: Boolean,
     onSelectAudioSource: (AudioSourceType) -> Unit,
     onUpdateDsp: ((DspSettings) -> DspSettings) -> Unit,
     onUpdateSynthFallback: ((SynthFallbackConfig) -> SynthFallbackConfig) -> Unit,
     onUpdateDeviceTap: ((DeviceTapConfig) -> DeviceTapConfig) -> Unit,
     onSimulateDeviceTapNow: () -> Unit,
+    onUpdatePresetTransition: ((PresetTransitionConfig) -> PresetTransitionConfig) -> Unit,
 ) {
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1100,6 +1103,13 @@ fun AudioDspTabContent(
                     }
                 }
             }
+        }
+
+        item(key = "preset_transition_settings_card") {
+            PresetTransitionSettingsCard(
+                config = presetTransitionConfig,
+                onUpdateConfig = onUpdatePresetTransition,
+            )
         }
     }
 }

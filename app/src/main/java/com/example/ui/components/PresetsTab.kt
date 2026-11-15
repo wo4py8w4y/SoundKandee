@@ -54,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.ColorEngineConfig
 import com.example.model.PresetCatalog
+import com.example.model.PresetTransitionConfig
 import com.example.model.TransformerNode
 import com.example.model.VisualLayer
 import com.example.model.VisualizerPreset
@@ -76,6 +77,7 @@ fun PresetsTabContent(
     currentLayers: List<VisualLayer>,
     currentTransformers: List<TransformerNode>,
     currentColorEngine: ColorEngineConfig,
+    presetTransitionConfig: PresetTransitionConfig,
     onLoadPreset: (VisualizerPreset) -> Unit,
     onPrevPreset: () -> Unit,
     onNextPreset: () -> Unit,
@@ -85,6 +87,7 @@ fun PresetsTabContent(
     onRenamePreset: (String, String, String?) -> Unit,
     onDeletePreset: (String) -> Unit,
     onRevertPreset: () -> Unit,
+    onUpdatePresetTransition: ((PresetTransitionConfig) -> PresetTransitionConfig) -> Unit,
 ) {
     var renamingPreset by remember { mutableStateOf<VisualizerPreset?>(null) }
     val activePreset = (userPresets + builtInPresets).firstOrNull { it.id == activePresetId }
@@ -228,6 +231,13 @@ fun PresetsTabContent(
                     }
                 }
             }
+        }
+
+        item(key = "presets_crossfade_bar") {
+            PresetsTabCrossfadeBar(
+                config = presetTransitionConfig,
+                onUpdateConfig = onUpdatePresetTransition,
+            )
         }
 
         item(key = "user_presets_header") {

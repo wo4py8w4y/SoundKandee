@@ -38,6 +38,7 @@ import com.example.model.AudioSourceType
 import com.example.model.ColorEngineConfig
 import com.example.model.DspSettings
 import com.example.model.LfoChannelConfig
+import com.example.model.PresetTransitionConfig
 import com.example.model.TempoSyncConfig
 import com.example.model.TempoSyncMode
 import com.example.model.TempoSyncSnapshot
@@ -88,6 +89,7 @@ fun StudioDock(
     onRenamePreset: (String, String, String?) -> Unit,
     onDeletePreset: (String) -> Unit,
     onRevertPreset: () -> Unit,
+    onUpdatePresetTransition: ((PresetTransitionConfig) -> PresetTransitionConfig) -> Unit,
     onToggleLayerExpanded: (String) -> Unit,
     onAddLayer: (VisualStyleType) -> Unit,
     onDuplicateLayer: (String) -> Unit,
@@ -252,6 +254,7 @@ fun StudioDock(
                         currentLayers = uiState.layers,
                         currentTransformers = uiState.transformers,
                         currentColorEngine = uiState.colorEngine,
+                        presetTransitionConfig = uiState.presetTransitionConfig,
                         onLoadPreset = onLoadPreset,
                         onPrevPreset = onPrevPreset,
                         onNextPreset = onNextPreset,
@@ -261,6 +264,7 @@ fun StudioDock(
                         onRenamePreset = onRenamePreset,
                         onDeletePreset = onDeletePreset,
                         onRevertPreset = onRevertPreset,
+                        onUpdatePresetTransition = onUpdatePresetTransition,
                     )
                     StudioTab.AUDIO_DSP -> AudioDspTabContent(
                         audioSource = uiState.audioSource,
@@ -268,12 +272,14 @@ fun StudioDock(
                         dspSettings = uiState.dspSettings,
                         synthFallbackConfig = uiState.synthFallbackConfig,
                         deviceTapConfig = uiState.deviceTapConfig,
+                        presetTransitionConfig = uiState.presetTransitionConfig,
                         hasTapHardwareSensor = hasTapHardwareSensor,
                         onSelectAudioSource = onSelectAudioSource,
                         onUpdateDsp = onUpdateDsp,
                         onUpdateSynthFallback = onUpdateSynthFallback,
                         onUpdateDeviceTap = onUpdateDeviceTap,
                         onSimulateDeviceTapNow = onSimulateDeviceTapNow,
+                        onUpdatePresetTransition = onUpdatePresetTransition,
                     )
                 }
             }

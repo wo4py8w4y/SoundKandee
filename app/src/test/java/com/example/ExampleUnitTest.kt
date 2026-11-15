@@ -16,12 +16,17 @@ import com.example.model.LfoChannelConfig
 import com.example.model.LfoWaveform
 import com.example.model.ModulationDriver
 import com.example.model.ModulationEvaluator
+import androidx.compose.ui.graphics.Color
 import com.example.model.PresetCatalog
+import com.example.model.PresetTransitionBlender
 import com.example.model.ScopedParam
 import com.example.model.TempoSyncConfig
 import com.example.model.TempoSyncMode
 import com.example.model.TempoSyncSnapshot
+import com.example.model.TransformerType
+import com.example.model.TransitionCurve
 import kotlin.math.PI
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
@@ -296,6 +301,67 @@ class ExampleUnitTest {
         assertTrue("Expected most synthetic music frames to be active, got $activeFrames/90", activeFrames > 75)
         assertTrue("Expected synthetic techno beats to trigger beatOnset, got $beatOnsets", beatOnsets >= 2)
         assertTrue("Expected synthetic hi-hats/synths to excite treble spectrum bands", peakHighEnergy > 0.02f)
+    }
+
+    @Test
+    fun preset_transition_curves_produce_expected_gain_profiles() {
+        // Every curve starts cleanly at out=1, in=0 and ends at out=0, in=1
+        TransitionCurve.entries.forEach { curve ->
+            val start = PresetTransitionBlender.evaluateGains(0f, curve)
+            val end = PresetTransitionBlender.evaluateGains(1f, curve)
+            assertEquals("$curve start outGain", 1f, start.outgoingGain, 1e-4f)
+            assertEquals("$curve start inGain", 0f, start.incomingGain, 1e-4f)
+            assertEquals("$curve end outGain", 0f, end.outgoingGain, 1e-4f)
+            assertEquals("$curve end inGain", 1f, end.incomingGain, 1e-4f)
+        }
+
+        // Equal power preserves energy: out^2 + in^2 == 1 at midpoint
+        val eqMid = PresetTransitionBlender.evaluateGains(0.5f, TransitionCurve.EQUAL_POWER)
+        val power = eqMid.outgoingGain.pow(2) + eqMid.incomingGain.pow(2)
+        assertEquals("Equal power energy sum", 1f, power, 1e-3f)
+
+        // Cosine dip is near dark at exact 0.5 midpoint before blooming incoming preset
+        val dipMid = PresetTransitionBlender.evaluateGains(0.5f, TransitionCurve.COSINE_DIP)
+        assertEquals(0f, dipMid.outgoingGain, 1e-4f)
+        assertEquals(0f, dipMid.incomingGain, 1e-4f)
+    }
+
+    @Test
+    fun preset_transition_interpolates_transformers_via_neutral_baselines_and_mismatched_palettes() {
+        val fromTx = mapOf(
+            TransformerType.MILK_PER_PIXEL_WARP to Triple(1.0f, 6f, 2f),
+        )
+        val toTx = mapOf(
+            TransformerType.MILK_RADIAL_TUNNEL_PULL to Triple(1.16f, 2.5f, 0.2f),
+            TransformerType.FEEDBACK_ECHO to Triple(0.8f, 1.04f, 4f),
+        )
+
+        val mid = PresetTransitionBlender.interpolateTxMaps(fromTx, toTx, 0.5f)
+        assertEquals(0.5f, mid[TransformerType.MILK_PER_PIXEL_WARP]!!.first, 1e-4f)
+        // Radial tunnel pull neutral zoom is 1.0f (not 0.0f) and neutral pulse is 0.0f
+        val midTunnel = mid[TransformerType.MILK_RADIAL_TUNNEL_PULL]!!
+        assertEquals(1.08f, midTunnel.first, 1e-4f)
+        assertEquals(2.5f, midTunnel.second, 1e-4f)
+        assertEquals(0.1f, midTunnel.third, 1e-4f)
+        // Feedback echo neutral decay is 0.0f, neutral zoom is 1.0f
+        val midEcho = mid[TransformerType.FEEDBACK_ECHO]!!
+        assertEquals(0.4f, midEcho.first, 1e-4f)
+        assertEquals(1.02f, midEcho.second, 1e-4f)
+
+        // Mismatched palette sizes blend cleanly without out-of-bounds errors
+        val palA = listOf(Color.Red, Color.Blue)
+        val palB = listOf(Color.Green, Color.Yellow, Color.Cyan, Color.Magenta)
+        val palMid = PresetTransitionBlender.lerpPalettes(palA, palB, 0.5f)
+        assertEquals(4, palMid.size)
+        assertEquals(0.5f, palMid.first().red, 0.01f)
+        assertEquals(0.5f, palMid.first().green, 0.01f)
+
+        // Spatial symmetry difference detection
+        val kaleido4 = mapOf(TransformerType.KALEIDOSCOPE_MIRROR to Triple(4f, 0f, 1f))
+        val kaleido8 = mapOf(TransformerType.KALEIDOSCOPE_MIRROR to Triple(8f, 0f, 1f))
+        assertTrue(PresetTransitionBlender.hasDifferentSpatialSymmetry(kaleido4, emptyMap()))
+        assertTrue(PresetTransitionBlender.hasDifferentSpatialSymmetry(kaleido4, kaleido8))
+        assertFalse(PresetTransitionBlender.hasDifferentSpatialSymmetry(kaleido4, kaleido4))
     }
 }
 

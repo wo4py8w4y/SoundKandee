@@ -21,12 +21,14 @@ import com.example.model.LfoChannelConfig
 import com.example.model.LfoWaveform
 import com.example.model.ModulationDriver
 import com.example.model.PresetCatalog
+import com.example.model.PresetTransitionConfig
 import com.example.model.ResponseCurve
 import com.example.model.ScopedParam
 import com.example.model.TempoSyncConfig
 import com.example.model.TempoSyncMode
 import com.example.model.TransformerNode
 import com.example.model.TransformerType
+import com.example.model.TransitionCurve
 import com.example.model.VisualLayer
 import com.example.model.VisualStyleType
 import com.example.model.VisualizerPreset
@@ -43,6 +45,7 @@ data class PersistedWorkspace(
     val lfoBank: List<LfoChannelConfig> = LfoChannelConfig.defaults(),
     val deviceTapConfig: DeviceTapConfig = DeviceTapConfig(),
     val synthFallbackConfig: SynthFallbackConfig = SynthFallbackConfig(),
+    val presetTransitionConfig: PresetTransitionConfig = PresetTransitionConfig(),
     val layers: List<VisualLayer> = PresetCatalog.presets.first().layers,
     val transformers: List<TransformerNode> = PresetCatalog.presets.first().transformers,
     val colorEngine: ColorEngineConfig = PresetCatalog.defaultColorEngine(PresetCatalog.presets.first().paletteId),
@@ -254,6 +257,13 @@ class PreferencesRepository(private val context: Context) {
             put("silenceDelaySec", w.synthFallbackConfig.silenceDelaySec.toDouble())
             put("tempoBpm", w.synthFallbackConfig.tempoBpm.toDouble())
         })
+        root.put("presetTransition", JSONObject().apply {
+            put("enabled", w.presetTransitionConfig.enabled)
+            put("durationMs", w.presetTransitionConfig.durationMs)
+            put("curve", w.presetTransitionConfig.curve.name)
+            put("morphShadersAndPalettes", w.presetTransitionConfig.morphShadersAndPalettes)
+            put("crossfadeOnRandomize", w.presetTransitionConfig.crossfadeOnRandomize)
+        })
         root.put("layers", JSONArray().apply {
             w.layers.forEach { put(encodeLayer(it)) }
         })
@@ -309,12 +319,25 @@ class PreferencesRepository(private val context: Context) {
         val colorObj = root.optJSONObject("color")
         val color = if (colorObj != null) decodeColor(colorObj) else PresetCatalog.defaultColorEngine()
 
+        val transCfgObj = root.optJSONObject("presetTransition")
+        val presetTransition = if (transCfgObj != null) {
+            PresetTransitionConfig(
+                enabled = transCfgObj.optBoolean("enabled", true),
+                durationMs = transCfgObj.optInt("durationMs", 750)
+                    .coerceIn(PresetTransitionConfig.MIN_DURATION_MS, PresetTransitionConfig.MAX_DURATION_MS),
+                curve = enumOrDefault(transCfgObj.optString("curve"), TransitionCurve.SMOOTHSTEP),
+                morphShadersAndPalettes = transCfgObj.optBoolean("morphShadersAndPalettes", true),
+                crossfadeOnRandomize = transCfgObj.optBoolean("crossfadeOnRandomize", true),
+            )
+        } else PresetTransitionConfig()
+
         return PersistedWorkspace(
             audioSource = source,
             dspSettings = dsp,
             lfoBank = lfoBank,
             deviceTapConfig = deviceTap,
             synthFallbackConfig = synthFallback,
+            presetTransitionConfig = presetTransition,
             layers = layers,
             transformers = transformers,
             colorEngine = color,
