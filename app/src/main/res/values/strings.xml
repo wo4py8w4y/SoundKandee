@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">ChromaWave</string>
+    <string name="capture_notification_channel_name">Audio Capture</string>
+    <string name="capture_notification_channel_desc">Active while visualizing playback audio from other apps</string>
+    <string name="capture_notification_title">ChromaWave Audio Sync Active</string>
+    <string name="capture_notification_text">Visualizing live device playback audio</string>
+</resources>
